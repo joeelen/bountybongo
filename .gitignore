@@ -31,6 +31,9 @@ dist-ssr
 # Vercel
 .vercel
 
+# Prevent stale compiled server files
+server/*.js
+
 # Agent working files
 .agents/
 
