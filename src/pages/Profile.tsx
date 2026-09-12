@@ -1,0 +1,298 @@
+import React, { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useAuth } from '../lib/AuthContext';
+import { useGps } from '../lib/GpsContext';
+import { Shield, Activity, Trophy, Globe, Target, Clock, Cloud, LogIn } from 'lucide-react';
+import { CloudAuthModal } from '../components/CloudAuthModal';
+
+const ProfilePage: React.FC = () => {
+  const { user, profile, isGuest, toggleDark } = useAuth();
+  const { lat, lng, isSimulated } = useGps();
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+
+  // Query personal stats
+  const { data: stats } = useQuery({
+    queryKey: ['profileStats'],
+    queryFn: async () => {
+      const res = await fetch('/api/profile/stats');
+      if (!res.ok) throw new Error('Failed to load stats');
+      return res.json();
+    },
+    refetchInterval: 15000
+  });
+
+  if (!user || !profile) {
+    return (
+      <div className="flex-1 grid-bg flex flex-col items-center justify-center font-mono text-zinc-500 animate-pulse">
+        CONNECTING PROFILE UPLINK...
+      </div>
+    );
+  }
+
+  const getRankDesignation = (score: number) => {
+    if (score >= 1000) return { label: 'APEX PREDATOR', color: 'text-cyber-red glow-red' };
+    if (score >= 500) return { label: 'LEGENDARY HUNTER', color: 'text-cyber-yellow glow-yellow' };
+    if (score >= 200) return { label: 'ELITE RECON', color: 'text-cyber-cyan glow-cyan' };
+    if (score >= 50) return { label: 'FIELD OPERATIVE', color: 'text-zinc-300' };
+    return { label: 'NOVICE AGENT', color: 'text-zinc-500' };
+  };
+
+  const rank = getRankDesignation(profile.score);
+
+  const formatTimestamp = (ts: string | Date) => {
+    const d = new Date(ts);
+    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+
+  return (
+    <div className="flex-1 w-full h-full grid-bg p-4 overflow-y-auto font-rajdhani flex flex-col items-center pt-8 pb-20 md:pb-8">
+      <div className="w-full max-w-3xl flex flex-col gap-6">
+
+        {/* Header Banner */}
+        <div className="border-b border-cyber-border pb-4 flex items-center gap-4 justify-between">
+          <div className="flex items-center gap-4">
+            <div className="relative">
+              <img
+                src={user.avatar}
+                alt=""
+                className="w-16 h-16 rounded-full border-2 border-cyber-cyan shadow-cyan-glow bg-zinc-950"
+              />
+              {profile.isDark && (
+                <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-cyber-green border-2 border-zinc-950 animate-pulse shadow-[0_0_8px_rgba(0,255,100,0.5)]" />
+              )}
+            </div>
+            <div className="text-left">
+              <div className="flex items-center gap-2">
+                <h1 className="text-2xl font-black font-orbitron text-cyber-cyan glow-cyan tracking-wider">
+                  {user.name}
+                </h1>
+                {isGuest ? (
+                  <span className="text-[10px] bg-cyber-yellow/15 text-cyber-yellow border border-cyber-yellow/30 px-2 py-0.5 rounded font-mono font-bold uppercase">
+                    Guest
+                  </span>
+                ) : (
+                  <span className="text-[10px] bg-cyber-green/15 text-cyber-green border border-cyber-green/30 px-2 py-0.5 rounded font-mono font-bold uppercase">
+                    Cloud Synced
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-zinc-500 uppercase font-mono mt-0.5">
+                TAG: @{user.name} · ID: {user.id}
+              </p>
+              <span className={`text-xs font-black uppercase tracking-wide font-orbitron mt-1 block ${rank.color}`}>
+                ◆ {rank.label}
+              </span>
+            </div>
+          </div>
+
+          {/* Score badge */}
+          <div className="flex flex-col items-center bg-zinc-900/80 border border-cyber-cyan/30 rounded-xl px-5 py-3">
+            <span className="text-2xl font-black font-mono text-cyber-cyan glow-cyan">{profile.score}</span>
+            <span className="text-[10px] text-zinc-500 uppercase font-black tracking-wider">XP POOL</span>
+          </div>
+        </div>
+
+        {/* Cloud Account & Progression Banner */}
+        <div className={`cyber-card p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border transition-all ${
+          isGuest 
+            ? 'border-cyber-yellow/40 bg-cyber-yellow/5' 
+            : 'border-cyber-green/40 bg-cyber-green/5'
+        }`}>
+          <div className="flex items-start gap-3">
+            <div className={`p-2.5 rounded-lg border shrink-0 ${
+              isGuest ? 'border-cyber-yellow/40 bg-zinc-950 text-cyber-yellow' : 'border-cyber-green/40 bg-zinc-950 text-cyber-green'
+            }`}>
+              <Cloud className="w-5 h-5 animate-pulse" />
+            </div>
+            <div className="flex flex-col text-left">
+              <div className="flex items-center gap-2">
+                <span className={`text-xs font-black uppercase tracking-wider font-orbitron ${
+                  isGuest ? 'text-cyber-yellow' : 'text-cyber-green'
+                }`}>
+                  {isGuest ? 'Local Guest Profile' : 'Cloud Account Synced'}
+                </span>
+                <span className={`text-[9px] px-1.5 py-0.5 rounded border uppercase font-bold ${
+                  isGuest ? 'bg-cyber-yellow/10 border-cyber-yellow/30 text-cyber-yellow' : 'bg-cyber-green/10 border-cyber-green/30 text-cyber-green'
+                }`}>
+                  {isGuest ? 'Device Only' : 'Saved to Cloud'}
+                </span>
+              </div>
+              <p className="text-xs text-zinc-400 mt-1 max-w-lg leading-relaxed">
+                {isGuest 
+                  ? 'Your progress and XP are currently saved only in this browser. Connect a Cloud Account to keep your points, access your profile anywhere, and add friends!'
+                  : `Signed in as ${user.name} (${user.email}). Your rank and XP are safely stored in the cloud.`
+                }
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
+            {isGuest ? (
+              <button
+                type="button"
+                onClick={() => setAuthModalOpen(true)}
+                className="w-full sm:w-auto min-h-[44px] px-4 py-2 bg-cyber-cyan hover:bg-white text-zinc-950 font-black text-xs uppercase rounded flex items-center justify-center gap-2 transition-all active:scale-95 shadow-cyan-glow/20"
+              >
+                <LogIn className="w-4 h-4" />
+                Connect Cloud Account
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setAuthModalOpen(true)}
+                className="w-full sm:w-auto min-h-[44px] px-3.5 py-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 hover:border-cyber-cyan text-zinc-300 font-bold text-xs uppercase rounded flex items-center justify-center gap-1.5 transition-all active:scale-95"
+              >
+                Manage Account
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Info Grid — 3 columns on md+ */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+
+          {/* Telemetry Status */}
+          <div className="cyber-card p-5 flex flex-col gap-3.5">
+            <span className="font-bold text-xs text-zinc-400 uppercase tracking-widest flex items-center gap-1.5 font-orbitron border-b border-zinc-900 pb-2">
+              <Activity className="w-4 h-4 text-cyber-cyan" />
+              Sensor Telemetry
+            </span>
+
+            <div className="flex flex-col gap-2.5 text-xs font-mono">
+              <div className="flex justify-between border-b border-zinc-900 pb-1.5">
+                <span className="text-zinc-500">GPS LAT:</span>
+                <span className="text-zinc-300 font-bold">{lat.toFixed(6)}</span>
+              </div>
+              <div className="flex justify-between border-b border-zinc-900 pb-1.5">
+                <span className="text-zinc-500">GPS LNG:</span>
+                <span className="text-zinc-300 font-bold">{lng.toFixed(6)}</span>
+              </div>
+              <div className="flex justify-between border-b border-zinc-900 pb-1.5">
+                <span className="text-zinc-500">GPS MODE:</span>
+                <span className={isSimulated ? 'text-cyber-red font-bold' : 'text-cyber-green font-bold'}>
+                  {isSimulated ? 'SIMULATED' : 'PHYSICAL'}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">HEARTBEAT:</span>
+                <span className="text-cyber-cyan animate-pulse">ACTIVE 10s</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Wild Zone Status */}
+          <div className="cyber-card p-5 flex flex-col gap-3.5">
+            <span className="font-bold text-xs text-zinc-400 uppercase tracking-widest flex items-center gap-1.5 font-orbitron border-b border-zinc-900 pb-2">
+              <Shield className="w-4 h-4 text-cyber-cyan" />
+              Wild Zone Control
+            </span>
+
+            <div className="flex flex-col gap-3 mt-1">
+              <div className={`flex flex-col items-center gap-2 py-4 rounded-lg border transition-all duration-300 ${
+                profile.isDark
+                  ? 'border-cyber-green/40 bg-cyber-green/5 shadow-[0_0_10px_rgba(0,255,100,0.1)]'
+                  : 'border-zinc-800 bg-zinc-950/40'
+              }`}>
+                <span className={`text-xs font-black uppercase tracking-widest ${profile.isDark ? 'text-cyber-green' : 'text-zinc-500'}`}>
+                  {profile.isDark ? '● ACTIVE' : '○ OFFLINE'}
+                </span>
+                <button
+                  onClick={() => toggleDark(!profile.isDark)}
+                  className={`px-5 py-2 rounded text-xs font-black border uppercase transition-all duration-300 ${
+                    profile.isDark
+                      ? 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-white'
+                      : 'bg-cyber-green/10 text-cyber-green border-cyber-green/40 hover:bg-cyber-green/20'
+                  }`}
+                >
+                  {profile.isDark ? 'Go Offline' : 'Go Active'}
+                </button>
+              </div>
+              <p className="text-[10px] text-zinc-600 leading-relaxed font-mono">
+                Going Active places your profile into the ambient hider pool. The server clusters active players within 800m for daily random events.
+              </p>
+            </div>
+          </div>
+
+          {/* Combat Stats */}
+          <div className="cyber-card p-5 flex flex-col gap-3.5">
+            <span className="font-bold text-xs text-zinc-400 uppercase tracking-widest flex items-center gap-1.5 font-orbitron border-b border-zinc-900 pb-2">
+              <Trophy className="w-4 h-4 text-cyber-yellow" />
+              Combat Registry
+            </span>
+
+            <div className="grid grid-cols-2 gap-2 mt-1">
+              <div className="flex flex-col items-center p-3 rounded-lg bg-zinc-950/60 border border-zinc-800">
+                <span className="text-xl font-black text-cyber-cyan glow-cyan">{stats?.catchesMade ?? 0}</span>
+                <span className="text-[10px] text-zinc-500 uppercase font-black mt-0.5 text-center">Catches Made</span>
+              </div>
+              <div className="flex flex-col items-center p-3 rounded-lg bg-zinc-950/60 border border-zinc-800">
+                <span className="text-xl font-black text-cyber-red">{stats?.timesCaught ?? 0}</span>
+                <span className="text-[10px] text-zinc-500 uppercase font-black mt-0.5 text-center">Times Caught</span>
+              </div>
+              <div className="flex flex-col items-center p-3 rounded-lg bg-zinc-950/60 border border-zinc-800">
+                <span className="text-xl font-black text-cyber-orange">{stats?.matchesPlayed ?? 0}</span>
+                <span className="text-[10px] text-zinc-500 uppercase font-black mt-0.5 text-center">Matches Joined</span>
+              </div>
+              <div className="flex flex-col items-center p-3 rounded-lg bg-zinc-950/60 border border-zinc-800">
+                <span className="text-xl font-black text-zinc-300">{profile.score}</span>
+                <span className="text-[10px] text-zinc-500 uppercase font-black mt-0.5 text-center">Total XP</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Recent Catches */}
+        <div className="cyber-card p-5 flex flex-col gap-3">
+          <span className="font-bold text-xs text-zinc-400 uppercase tracking-widest flex items-center gap-1.5 font-orbitron border-b border-zinc-900 pb-2">
+            <Target className="w-4 h-4 text-cyber-red" />
+            Recent Capture Log
+          </span>
+
+          {!stats || stats.recentCatches?.length === 0 ? (
+            <div className="text-zinc-600 text-xs text-center font-mono py-6">
+              NO CAPTURE RECORDS FOUND IN COMBAT LOG.
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2 mt-1">
+              {stats.recentCatches?.map((c: any) => (
+                <div key={c.id} className="flex items-center justify-between p-2.5 rounded bg-zinc-900/60 border border-cyber-border hover:border-cyber-red/30 transition-colors">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-2 h-2 rounded-full bg-cyber-red shrink-0" />
+                    <img src={c.targetAvatar} alt="" className="w-6 h-6 rounded-full border border-cyber-border" />
+                    <div className="flex flex-col">
+                      <span className="text-xs font-bold text-zinc-300">{c.targetName}</span>
+                      {c.matchId && (
+                        <span className="text-[10px] text-zinc-600 font-mono">Match: {c.matchId}</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[10px] text-zinc-500 font-mono">
+                    <Clock className="w-3 h-3" />
+                    {formatTimestamp(c.timestamp)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* GPS Disclaimer */}
+        <div className="cyber-card p-4 border-cyber-cyan/10 bg-zinc-950/20 text-xs text-zinc-500 leading-relaxed font-mono flex gap-3">
+          <Globe className="w-6 h-6 text-cyber-cyan shrink-0 mt-0.5" />
+          <div>
+            <strong className="text-zinc-400 block mb-1">GEOFENCING MATRIX WARNING</strong>
+            This system tracks active coordinates relative to physical GPS sensors. In matches, ensure you stay inside the designated cyber play area circle. Placing bombs or making catches validates your coordinates directly on the host server using the Haversine equation.
+          </div>
+        </div>
+
+      </div>
+
+      <CloudAuthModal
+        isOpen={authModalOpen}
+        onClose={() => setAuthModalOpen(false)}
+      />
+    </div>
+  );
+};
+
+export default ProfilePage;
