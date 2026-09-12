@@ -160,6 +160,7 @@ const CustomMapContainer: React.FC<MapProps> = ({
         zoom={16}
         className="w-full h-full"
         zoomControl={false}
+        attributionControl={false}
       >
         {/* Recenter triggers */}
         <MapRecenter center={[lat, lng]} trigger={activeTrigger} />
@@ -167,10 +168,10 @@ const CustomMapContainer: React.FC<MapProps> = ({
         {/* Map warping click triggers */}
         <MapEventsHandler isSimulated={isSimulated} onMapClick={handleMapClick} />
 
-        {/* Bright theme maps layer */}
+        {/* Sleek Cyberpunk Dark Map layer (CARTO Dark Matter Retina) */}
         <TileLayer
-          attribution='&copy; <a href="https://carto.com/">CARTO</a>'
-          url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+          subdomains="abcd"
           maxZoom={20}
         />
 

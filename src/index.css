@@ -77,12 +77,9 @@
   color: #0d0e12 !important;
 }
 
-/* Hide default leaflet attribution for clean UI */
+/* Hide default leaflet attribution / watermark completely for clean game UI */
 .leaflet-control-attribution {
-  background: rgba(13, 14, 18, 0.8) !important;
-  color: #94a3b8 !important;
-  font-family: 'Rajdhani', sans-serif !important;
-  font-size: 10px !important;
+  display: none !important;
 }
 
 /* Scrollbar customization */
