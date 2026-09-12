@@ -3,10 +3,11 @@ import { relations } from 'drizzle-orm';
 
 // 1. Users Table
 export const users = pgTable('users', {
-  id: text('id').primaryKey(), // Replit Auth user ID or dev username
+  id: text('id').primaryKey(), // User ID or username
   email: text('email').notNull(),
   name: text('name').notNull(),
   avatar: text('avatar').notNull(),
+  password: text('password'),
 });
 
 // 2. Profiles Table

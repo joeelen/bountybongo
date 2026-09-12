@@ -17,18 +17,25 @@ const { fetch: originalFetch } = window;
 window.fetch = async (input, init) => {
   try {
     const devUserId = localStorage.getItem('dev_user_id');
+    const bountyAccount = localStorage.getItem('bounty_account');
     if (devUserId) {
       if (input instanceof Request) {
         try {
           input.headers.set('x-dev-user-id', devUserId);
+          if (bountyAccount) {
+            input.headers.set('x-user-data', encodeURIComponent(bountyAccount));
+          }
           return originalFetch(input, init);
         } catch (err) {
-          // If Request headers are read-only (immutable), clone the Request object with the header
+          // If Request headers are read-only (immutable), clone the Request object with the headers
           const headersInit: Record<string, string> = {};
           input.headers.forEach((value, key) => {
             headersInit[key] = value;
           });
           headersInit['x-dev-user-id'] = devUserId;
+          if (bountyAccount) {
+            headersInit['x-user-data'] = encodeURIComponent(bountyAccount);
+          }
           const newRequest = new Request(input, { headers: headersInit });
           return originalFetch(newRequest, init);
         }
@@ -37,6 +44,9 @@ window.fetch = async (input, init) => {
         const headers = new Headers(newInit.headers);
         if (!headers.has('x-dev-user-id')) {
           headers.set('x-dev-user-id', devUserId);
+        }
+        if (bountyAccount && !headers.has('x-user-data')) {
+          headers.set('x-user-data', encodeURIComponent(bountyAccount));
         }
         newInit.headers = headers;
         return originalFetch(input, newInit);

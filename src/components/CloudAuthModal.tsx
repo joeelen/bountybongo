@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../lib/AuthContext';
 import { useToast } from '../lib/ToastContext';
-import { Cloud, X, Shield, Sparkles, User, Mail, LogIn, UserPlus, CheckCircle2 } from 'lucide-react';
+import { Cloud, X, Shield, Sparkles, User, Mail, LogIn, UserPlus, CheckCircle2, Lock, Eye, EyeOff } from 'lucide-react';
 
 interface CloudAuthModalProps {
   isOpen: boolean;
@@ -12,13 +12,15 @@ interface CloudAuthModalProps {
 export const CloudAuthModal: React.FC<CloudAuthModalProps> = ({
   isOpen,
   onClose,
-  defaultMode = 'register'
+  defaultMode = 'login'
 }) => {
-  const { user, profile, isGuest, linkCloudAccount, authLogin, switchToGuest } = useAuth();
+  const { user, profile, isGuest, login, register, authLogin, switchToGuest } = useAuth();
   const { success, error: toastError } = useToast();
 
-  const [mode, setMode] = useState<'register' | 'login' | 'presets'>(defaultMode);
+  const [mode, setMode] = useState<'login' | 'register' | 'presets'>(defaultMode);
   const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState('');
   const [transferXp, setTransferXp] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -33,23 +35,36 @@ export const CloudAuthModal: React.FC<CloudAuthModalProps> = ({
     setErrorMsg('');
     const cleanUsername = username.trim();
     if (!cleanUsername) {
-      setErrorMsg('Please choose a username for your cloud account');
+      setErrorMsg('Vennligst skriv inn brukernavn');
+      return;
+    }
+    if (!password) {
+      setErrorMsg('Vennligst skriv inn passord');
       return;
     }
 
     setIsSubmitting(true);
     try {
-      await linkCloudAccount({
-        username: cleanUsername,
-        email: email.trim() || undefined,
-        transferScore: transferXp && isGuest
-      });
-
-      success(`Connected! Logged in as ${cleanUsername}. Cloud sync active.`);
+      if (mode === 'register') {
+        await register({
+          username: cleanUsername,
+          password: password,
+          email: email.trim() || undefined,
+          transferScore: transferXp && isGuest
+        });
+        success(`Konto opprettet! Logget inn som ${cleanUsername}. Sky-synk aktiv.`);
+      } else {
+        await login({
+          username: cleanUsername,
+          password: password
+        });
+        success(`Velkommen tilbake! Logget inn som ${cleanUsername}.`);
+      }
       onClose();
     } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to authenticate cloud account');
-      toastError(err.message || 'Authentication failed');
+      const msg = err.message || 'Autentisering feilet';
+      setErrorMsg(msg);
+      toastError(msg);
     } finally {
       setIsSubmitting(false);
     }
@@ -170,6 +185,18 @@ export const CloudAuthModal: React.FC<CloudAuthModalProps> = ({
         <div className="flex border-b border-zinc-900 text-xs font-bold font-orbitron bg-zinc-950">
           <button
             type="button"
+            onClick={() => { setMode('login'); setErrorMsg(''); }}
+            className={`flex-1 py-2.5 flex items-center justify-center gap-1.5 border-b-2 transition-all ${
+              mode === 'login' 
+                ? 'border-cyber-cyan text-cyber-cyan bg-cyber-cyan/5' 
+                : 'border-transparent text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            <LogIn className="w-3.5 h-3.5" />
+            Logg inn
+          </button>
+          <button
+            type="button"
             onClick={() => { setMode('register'); setErrorMsg(''); }}
             className={`flex-1 py-2.5 flex items-center justify-center gap-1.5 border-b-2 transition-all ${
               mode === 'register' 
@@ -178,7 +205,7 @@ export const CloudAuthModal: React.FC<CloudAuthModalProps> = ({
             }`}
           >
             <UserPlus className="w-3.5 h-3.5" />
-            Cloud Login / Sync
+            Opprett konto
           </button>
           <button
             type="button"
@@ -202,18 +229,20 @@ export const CloudAuthModal: React.FC<CloudAuthModalProps> = ({
             </div>
           )}
 
-          {mode === 'register' && (
+          {(mode === 'login' || mode === 'register') && (
             <form onSubmit={handleSubmit} className="flex flex-col gap-3">
               <div className="flex flex-col gap-1 text-left">
                 <label className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1">
                   <User className="w-3.5 h-3.5 text-cyber-cyan" />
-                  Your Username / Gamer Tag:
+                  Brukernavn:
                 </label>
                 <input
                   type="text"
+                  autoCapitalize="none"
+                  autoCorrect="off"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="e.g. Joel, ShadowHunter, NeonViper..."
+                  placeholder="f.eks. Joel, ShadowHunter..."
                   className="w-full min-h-[44px] bg-zinc-900 border border-cyber-border rounded px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-cyber-cyan font-mono"
                   required
                 />
@@ -221,19 +250,45 @@ export const CloudAuthModal: React.FC<CloudAuthModalProps> = ({
 
               <div className="flex flex-col gap-1 text-left">
                 <label className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1">
-                  <Mail className="w-3.5 h-3.5 text-zinc-500" />
-                  Email Address (Optional):
+                  <Lock className="w-3.5 h-3.5 text-cyber-cyan" />
+                  Passord:
                 </label>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="your.email@example.com (optional)"
-                  className="w-full min-h-[44px] bg-zinc-900 border border-cyber-border rounded px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-cyber-cyan font-mono"
-                />
+                <div className="relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Ditt passord"
+                    className="w-full min-h-[44px] bg-zinc-900 border border-cyber-border rounded pl-3 pr-10 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-cyber-cyan font-mono"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-200 p-1"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
 
-              {isGuest && currentScore > 0 && (
+              {mode === 'register' && (
+                <div className="flex flex-col gap-1 text-left">
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1">
+                    <Mail className="w-3.5 h-3.5 text-zinc-500" />
+                    E-post (valgfritt):
+                  </label>
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="din.epost@example.com"
+                    className="w-full min-h-[44px] bg-zinc-900 border border-cyber-border rounded px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-cyber-cyan font-mono"
+                  />
+                </div>
+              )}
+
+              {mode === 'register' && isGuest && currentScore > 0 && (
                 <label className="flex items-center gap-2 p-2.5 rounded bg-zinc-900/50 border border-zinc-800 text-xs text-zinc-300 cursor-pointer select-none">
                   <input
                     type="checkbox"
@@ -241,17 +296,20 @@ export const CloudAuthModal: React.FC<CloudAuthModalProps> = ({
                     onChange={(e) => setTransferXp(e.target.checked)}
                     className="w-4 h-4 accent-cyber-cyan rounded"
                   />
-                  <span>Transfer my current <strong>{currentScore} XP</strong> to this account</span>
+                  <span>Overfør min nåværende <strong>{currentScore} XP</strong> til denne kontoen</span>
                 </label>
               )}
 
               <button
                 type="submit"
-                disabled={isSubmitting || !username.trim()}
-                className="w-full min-h-[44px] mt-1 bg-cyber-cyan hover:bg-white text-zinc-950 font-black text-xs uppercase rounded transition-all active:scale-95 disabled:opacity-40 flex items-center justify-center gap-2 shadow-cyan-glow/20"
+                disabled={isSubmitting || !username.trim() || !password}
+                className="w-full min-h-[44px] mt-1 bg-cyber-cyan hover:bg-white text-zinc-950 font-black text-xs uppercase rounded transition-all active:scale-95 disabled:opacity-40 flex items-center justify-center gap-2 shadow-cyan-glow/20 font-orbitron"
               >
-                <LogIn className="w-4 h-4" />
-                {isSubmitting ? 'Syncing...' : 'Save & Sync Cloud Account'}
+                {mode === 'login' ? <LogIn className="w-4 h-4" /> : <UserPlus className="w-4 h-4" />}
+                {isSubmitting 
+                  ? 'Behandler...' 
+                  : (mode === 'login' ? 'Logg inn på konto' : 'Opprett konto & Synkroniser')
+                }
               </button>
             </form>
           )}

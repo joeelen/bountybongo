@@ -50,16 +50,32 @@ const Matches: React.FC = () => {
     queryKey: ['match', activeMatchId],
     queryFn: async () => {
       if (!activeMatchId) return null;
-      const res = await fetch(`/api/matches/${activeMatchId}`);
-      if (!res.ok) {
-        sessionStorage.removeItem('active_match_id');
-        setActiveMatchId(null);
-        throw new Error('Match not found');
+      const cachedData = sessionStorage.getItem('active_match_data');
+      const headers: Record<string, string> = {};
+      if (cachedData) {
+        headers['x-match-sync'] = encodeURIComponent(cachedData);
       }
-      return res.json();
+      const res = await fetch(`/api/matches/${activeMatchId}`, { headers });
+      if (!res.ok) {
+        // Only clear if confirmed 404 AND we have no local match cache
+        if (res.status === 404 && !cachedData) {
+          sessionStorage.removeItem('active_match_id');
+          sessionStorage.removeItem('active_match_data');
+          setActiveMatchId(null);
+          throw new Error('Match not found');
+        }
+        throw new Error('Match status polling failed');
+      }
+      const json = await res.json();
+      if (json?.match) {
+        sessionStorage.setItem('active_match_data', JSON.stringify(json.match));
+      }
+      return json;
     },
     enabled: !!activeMatchId,
-    refetchInterval: 1000 // Poll active match states every 1 second
+    refetchInterval: 1000, // Poll active match states every 1 second
+    retry: 3,
+    retryDelay: 1000
   });
 
   // Query server for rejoinable matches in progress
@@ -135,6 +151,8 @@ const Matches: React.FC = () => {
     },
     onSuccess: (data) => {
       setActiveMatchId(data.id);
+      sessionStorage.setItem('active_match_id', data.id);
+      sessionStorage.setItem('active_match_data', JSON.stringify(data));
       queryClient.invalidateQueries({ queryKey: ['match', data.id] });
       info('Match Created', `Code: ${data.id} — Share it with friends!`);
     },
@@ -154,8 +172,14 @@ const Matches: React.FC = () => {
       }
       return res.json();
     },
-    onSuccess: (_, variables) => {
+    onSuccess: (data, variables) => {
       setActiveMatchId(variables.id);
+      sessionStorage.setItem('active_match_id', variables.id);
+      if (data?.match) {
+        sessionStorage.setItem('active_match_data', JSON.stringify(data.match));
+      } else if (data) {
+        sessionStorage.setItem('active_match_data', JSON.stringify(data));
+      }
       setJoinCode('');
       setMatchError('');
       queryClient.invalidateQueries({ queryKey: ['match', variables.id] });
@@ -281,6 +305,7 @@ const Matches: React.FC = () => {
   const handleExitMatch = () => {
     setIsChatOpen(false);
     sessionStorage.removeItem('active_match_id');
+    sessionStorage.removeItem('active_match_data');
     setActiveMatchId(null);
   };
 

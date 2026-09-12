@@ -88,7 +88,8 @@ function seedMockUsers() {
       id,
       email: `${id}@bounty.com`,
       name: id.toUpperCase(),
-      avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${id}`
+      avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${id}`,
+      password: '123'
     });
     mockProfiles.set(id, {
       id,
@@ -105,7 +106,13 @@ function seedMockUsers() {
 
 // Check database connection at start
 async function checkDbConnection() {
-  if (!process.env.DATABASE_URL) {
+  const hasDbEnv = !!(
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL ||
+    process.env.POSTGRES_URL_NON_POOLING ||
+    process.env.POSTGRES_PRISMA_URL
+  );
+  if (!hasDbEnv) {
     isDbConnected = false;
     seedMockUsers();
     return;
@@ -134,10 +141,18 @@ app.use(async (req: any, res, next) => {
   let userEmail = replitEmail;
   let userAvatar = replitAvatar;
 
-  // Dev mode override (reads header or cookie or query param)
-  let devUserId = req.headers['x-dev-user-id'] || req.cookies?.['dev-user-id'] || req.query.dev_user_id;
+  // Client user data sync header (ensures serverless lambdas recover user identity & score)
+  const userDataHeader = req.headers['x-user-data'] as string;
+  let clientUserData: any = null;
+  if (userDataHeader) {
+    try {
+      clientUserData = JSON.parse(decodeURIComponent(userDataHeader));
+    } catch (e) {}
+  }
+
+  // Dev mode override (reads header or cookie or query param or sync header)
+  let devUserId = req.headers['x-dev-user-id'] || req.cookies?.['dev-user-id'] || req.query.dev_user_id || clientUserData?.id;
   
-  // TEMPORARY AUTO-LOGIN BYPASS:
   // Fallback to default 'host' profile if no user session is present
   if (!userId && !devUserId) {
     devUserId = 'host';
@@ -145,9 +160,9 @@ app.use(async (req: any, res, next) => {
 
   if (!userId && devUserId) {
     userId = devUserId as string;
-    userName = userId.charAt(0).toUpperCase() + userId.slice(1);
-    userEmail = `${userId}@bounty.com`;
-    userAvatar = `https://api.dicebear.com/7.x/bottts/svg?seed=${userId}`;
+    userName = clientUserData?.name || (userId.charAt(0).toUpperCase() + userId.slice(1));
+    userEmail = clientUserData?.email || `${userId}@bounty.com`;
+    userAvatar = clientUserData?.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${userId}`;
   }
 
   if (userId) {
@@ -168,7 +183,7 @@ app.use(async (req: any, res, next) => {
             id: userId,
             lat: 59.9139, // Default Oslo coordinates
             lng: 10.7522,
-            score: 0,
+            score: typeof clientUserData?.score === 'number' ? clientUserData.score : 0,
             bountyActive: false,
             isSpecial: false,
             isDark: false
@@ -190,9 +205,9 @@ app.use(async (req: any, res, next) => {
         });
         mockProfiles.set(userId, {
           id: userId,
-          lat: 59.9139,
-          lng: 10.7522,
-          score: 0,
+          lat: clientUserData?.lat || 59.9139,
+          lng: clientUserData?.lng || 10.7522,
+          score: typeof clientUserData?.score === 'number' ? clientUserData.score : 0,
           bountyActive: false,
           isSpecial: false,
           isDark: false,
@@ -259,18 +274,112 @@ app.post('/api/dev-login', (req, res) => {
   res.json({ success: true, username: cleanUsername });
 });
 
-// POST: Login/Register with Username, Email or External OAuth provider (Google/Apple)
-app.post('/api/auth/login', async (req: any, res) => {
-  const { id, email, name, username, avatar, transferScore } = req.body;
-  
-  const rawId = (id || username || name || '').trim();
-  const cleanId = rawId.toLowerCase().replace(/\s+/g, '_');
-  const cleanName = (name || username || rawId).trim();
+// POST: Register a new account with Username & Password
+app.post('/api/auth/register', async (req: any, res: any) => {
+  const { username, password, email, name, avatar, transferScore } = req.body;
+
+  if (!username || typeof username !== 'string' || username.trim().length < 2) {
+    return res.status(400).json({ error: 'Brukernavn må være minst 2 tegn.' });
+  }
+  if (!password || typeof password !== 'string' || password.length < 3) {
+    return res.status(400).json({ error: 'Passord må være minst 3 tegn.' });
+  }
+
+  const cleanUsername = username.trim();
+  const cleanId = cleanUsername.toLowerCase().replace(/\s+/g, '_');
+  const cleanName = (name || cleanUsername).trim();
   const cleanEmail = (email || `${cleanId}@bounty.com`).trim().toLowerCase();
   const cleanAvatar = avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${cleanId}`;
+  const initialScore = (typeof transferScore === 'number' && transferScore > 0) ? Math.floor(transferScore) : 0;
 
-  if (!cleanId || !cleanName) {
-    return res.status(400).json({ error: 'Username or account ID is required' });
+  if (isDbConnected) {
+    try {
+      const existingUser = await db.query.users.findFirst({
+        where: or(
+          eq(users.id, cleanId),
+          sql`lower(${users.name}) = ${cleanName.toLowerCase()}`
+        )
+      });
+      if (existingUser) {
+        return res.status(409).json({ error: `Brukernavnet '${cleanUsername}' er allerede i bruk. Vennligst logg inn eller velg et annet.` });
+      }
+
+      await db.insert(users).values({
+        id: cleanId,
+        email: cleanEmail,
+        name: cleanName,
+        avatar: cleanAvatar,
+        password: password
+      });
+
+      await db.insert(profiles).values({
+        id: cleanId,
+        lat: 59.9139,
+        lng: 10.7522,
+        score: initialScore,
+        bountyActive: false,
+        isSpecial: false,
+        isDark: false
+      });
+
+      const userRow = { id: cleanId, email: cleanEmail, name: cleanName, avatar: cleanAvatar };
+      const profileRow = { id: cleanId, score: initialScore, lat: 59.9139, lng: 10.7522, bountyActive: false, isDark: false };
+      res.cookie('dev-user-id', cleanId, getCookieOptions(req));
+      return res.json({ success: true, user: userRow, profile: profileRow });
+    } catch (err: any) {
+      console.error('Registration DB Error:', err);
+      return res.status(500).json({ error: 'Kunne ikke opprette brukerkonto i databasen.' });
+    }
+  } else {
+    // Memory fallback
+    let conflict = false;
+    mockUsers.forEach(u => {
+      if (u.id.toLowerCase() === cleanId || (u.name && u.name.toLowerCase() === cleanName.toLowerCase())) {
+        conflict = true;
+      }
+    });
+
+    if (conflict) {
+      return res.status(409).json({ error: `Brukernavnet '${cleanUsername}' er allerede i bruk. Vennligst logg inn eller velg et annet.` });
+    }
+
+    const newUser = {
+      id: cleanId,
+      email: cleanEmail,
+      name: cleanName,
+      avatar: cleanAvatar,
+      password: password
+    };
+    mockUsers.set(cleanId, newUser);
+    const newProfile = {
+      id: cleanId,
+      lat: 59.9139,
+      lng: 10.7522,
+      score: initialScore,
+      bountyActive: false,
+      isSpecial: false,
+      isDark: false,
+      updatedAt: new Date()
+    };
+    mockProfiles.set(cleanId, newProfile);
+
+    res.cookie('dev-user-id', cleanId, getCookieOptions(req));
+    return res.json({ success: true, user: { id: cleanId, email: cleanEmail, name: cleanName, avatar: cleanAvatar }, profile: newProfile });
+  }
+});
+
+// POST: Login with Username/Password, Email or OAuth provider
+app.post('/api/auth/login', async (req: any, res) => {
+  const { id, email, name, username, password, avatar, transferScore } = req.body;
+  
+  const rawId = (username || id || name || '').trim();
+  const cleanId = rawId.toLowerCase().replace(/\s+/g, '_');
+  const cleanName = (name || username || rawId).trim();
+  const cleanEmail = (email || (cleanId ? `${cleanId}@bounty.com` : '')).trim().toLowerCase();
+  const cleanAvatar = avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${cleanId}`;
+
+  if (!cleanId && !cleanEmail) {
+    return res.status(400).json({ error: 'Brukernavn eller e-post er påkrevd.' });
   }
 
   const bonusScore = (typeof transferScore === 'number' && transferScore > 0) ? Math.floor(transferScore) : 0;
@@ -281,16 +390,27 @@ app.post('/api/auth/login', async (req: any, res) => {
         where: or(
           eq(users.id, cleanId),
           sql`lower(${users.name}) = ${cleanName.toLowerCase()}`,
-          eq(users.email, cleanEmail)
+          cleanEmail ? eq(users.email, cleanEmail) : sql`false`
         )
       });
+
+      // If user provided a password and account exists, verify it
+      if (userRow && password && userRow.password && userRow.password !== password) {
+        return res.status(401).json({ error: 'Feil passord. Vennligst prøv igjen.' });
+      }
+
+      // If user is logging in with credentials but account doesn't exist:
+      if (!userRow && password) {
+        return res.status(401).json({ error: `Fant ingen konto for '${cleanName}'. Vennligst opprett en konto først.` });
+      }
 
       if (!userRow) {
         await db.insert(users).values({
           id: cleanId,
-          email: cleanEmail,
-          name: cleanName,
-          avatar: cleanAvatar
+          email: cleanEmail || `${cleanId}@bounty.com`,
+          name: cleanName || cleanId,
+          avatar: cleanAvatar,
+          password: password || null
         });
         await db.insert(profiles).values({
           id: cleanId,
@@ -308,8 +428,9 @@ app.post('/api/auth/login', async (req: any, res) => {
           .where(eq(profiles.id, userRow.id));
       }
 
+      const profileRow = await db.query.profiles.findFirst({ where: eq(profiles.id, userRow.id) });
       res.cookie('dev-user-id', userRow.id, getCookieOptions(req));
-      return res.json({ success: true, user: userRow });
+      return res.json({ success: true, user: userRow, profile: profileRow });
     } catch (err: any) {
       console.error('Auth login error:', err);
       return res.status(500).json({ error: 'Database authentication failed' });
@@ -321,18 +442,27 @@ app.post('/api/auth/login', async (req: any, res) => {
       if (
         u.id.toLowerCase() === cleanId ||
         (u.name && u.name.toLowerCase() === cleanName.toLowerCase()) ||
-        (u.email && u.email.toLowerCase() === cleanEmail)
+        (cleanEmail && u.email && u.email.toLowerCase() === cleanEmail)
       ) {
         existingUser = u;
       }
     });
 
+    if (existingUser && password && existingUser.password && existingUser.password !== password) {
+      return res.status(401).json({ error: 'Feil passord. Vennligst prøv igjen.' });
+    }
+
+    if (!existingUser && password) {
+      return res.status(401).json({ error: `Fant ingen konto for '${cleanName}'. Vennligst opprett en konto først.` });
+    }
+
     if (!existingUser) {
       mockUsers.set(cleanId, {
         id: cleanId,
-        email: cleanEmail,
-        name: cleanName,
-        avatar: cleanAvatar
+        email: cleanEmail || `${cleanId}@bounty.com`,
+        name: cleanName || cleanId,
+        avatar: cleanAvatar,
+        password: password || undefined
       });
       mockProfiles.set(cleanId, {
         id: cleanId,
@@ -352,13 +482,18 @@ app.post('/api/auth/login', async (req: any, res) => {
       }
     }
 
+    const currentProfile = mockProfiles.get(existingUser.id);
     res.cookie('dev-user-id', existingUser.id, getCookieOptions(req));
-    return res.json({ success: true, user: existingUser });
+    return res.json({ success: true, user: existingUser, profile: currentProfile });
   }
 });
 
+// POST: Dev Logout & Standard Logout
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('dev-user-id', getCookieOptions(req));
+  res.json({ success: true });
+});
 
-// POST: Dev Logout
 app.post('/api/dev-logout', (req, res) => {
   res.clearCookie('dev-user-id', getCookieOptions(req));
   res.json({ success: true });
@@ -908,6 +1043,15 @@ app.get('/api/matches/:id', async (req: any, res) => {
   const matchId = req.params.id.toUpperCase();
   const requesterId = req.user?.id || '';
 
+  // Recover match state from client sync header if serverless instance lost it
+  const matchSyncHeader = req.headers['x-match-sync'] as string;
+  let clientMatchSync: any = null;
+  if (matchSyncHeader) {
+    try {
+      clientMatchSync = JSON.parse(decodeURIComponent(matchSyncHeader));
+    } catch (e) {}
+  }
+
   if (isDbConnected) {
     const matchRow = await db.query.matches.findFirst({ where: eq(matches.id, matchId) });
     if (!matchRow) return res.status(404).json({ error: 'Match not found' });
@@ -949,7 +1093,53 @@ app.get('/api/matches/:id', async (req: any, res) => {
 
     res.json({ match: { ...matchRow, currentZoneRadius }, participants: participantsList, bombs: activeBombs });
   } else {
-    const matchRow = mockMatches.get(matchId);
+    let matchRow = mockMatches.get(matchId);
+
+    // Auto-restore match if cold serverless instance lost it from memory
+    if (!matchRow && clientMatchSync) {
+      const restored = clientMatchSync.match || clientMatchSync;
+      if (restored.id === matchId) {
+        mockMatches.set(matchId, {
+          id: matchId,
+          hostId: restored.hostId || requesterId || 'host',
+          status: restored.status || 'waiting',
+          hidingDuration: restored.hidingDuration ?? 120,
+          revealInterval: restored.revealInterval ?? 120,
+          matchDuration: restored.matchDuration ?? 900,
+          catchRadius: restored.catchRadius ?? 30,
+          captureRadius: restored.captureRadius ?? 4,
+          bombArmingTime: restored.bombArmingTime ?? 60,
+          bombBlastRadius: restored.bombBlastRadius ?? 25,
+          bombHiddenDuration: restored.bombHiddenDuration ?? 45,
+          boundaryCenterLat: restored.boundaryCenterLat ?? 59.9139,
+          boundaryCenterLng: restored.boundaryCenterLng ?? 10.7522,
+          boundaryRadius: restored.boundaryRadius ?? 500,
+          zoneShrinkInterval: restored.zoneShrinkInterval ?? 120,
+          zoneShrinkAmount: restored.zoneShrinkAmount ?? 100,
+          startedAt: restored.startedAt ?? null,
+          hidingEndsAt: restored.hidingEndsAt ?? null,
+          huntingEndsAt: restored.huntingEndsAt ?? null
+        });
+        matchRow = mockMatches.get(matchId);
+
+        // Ensure host is participant
+        const hostId = matchRow.hostId;
+        if (!mockParticipants.some(p => p.matchId === matchId && p.userId === hostId)) {
+          mockParticipants.push({
+            id: mockParticipants.length + 1,
+            matchId: matchId,
+            userId: hostId,
+            role: 'seeker',
+            isCaught: false,
+            revealedLat: null,
+            revealedLng: null,
+            revealedAt: null,
+            joinedAt: new Date()
+          });
+        }
+      }
+    }
+
     if (!matchRow) return res.status(404).json({ error: 'Match not found' });
 
     const participantsList = mockParticipants.filter(p => p.matchId === matchId).map(p => {
