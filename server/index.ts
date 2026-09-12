@@ -12,9 +12,12 @@ app.use(cors());
 app.use(express.json());
 app.use(cookieParser());
 
-// Normalize /api prefix if stripped or routed by serverless rewrites
+// Normalize /api prefix and restore original path if rewritten by Vercel serverless
 app.use((req: any, res: any, next: any) => {
-  if (req.url && !req.url.startsWith('/api') && req.url !== '/') {
+  const vercelPath = req.headers['x-matched-path'] || req.headers['x-now-route-matches'];
+  if (vercelPath && typeof vercelPath === 'string' && vercelPath.startsWith('/api')) {
+    req.url = vercelPath;
+  } else if (req.url && !req.url.startsWith('/api') && req.url !== '/') {
     req.url = '/api' + req.url;
   }
   next();
@@ -213,6 +216,20 @@ function getCookieOptions(req: any) {
     sameSite: isSecure ? 'none' as const : 'lax' as const,
   };
 }
+
+// GET: Health and debug status
+app.get('/api/health', (req: any, res: any) => {
+  res.json({ status: 'ok', time: new Date().toISOString() });
+});
+
+app.get('/api/debug-url', (req: any, res: any) => {
+  res.json({
+    url: req.url,
+    originalUrl: req.originalUrl,
+    xMatchedPath: req.headers['x-matched-path'],
+    xNowRouteMatches: req.headers['x-now-route-matches']
+  });
+});
 
 // GET: Current user details
 app.get('/api/me', async (req: any, res) => {
