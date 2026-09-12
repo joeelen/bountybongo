@@ -118,9 +118,9 @@ const Navigation: React.FC = () => {
 };
 
 const MainRoutes: React.FC = () => {
-  const { isAuthenticated, isLoading } = useAuth();
+  const { isLoading, user } = useAuth();
 
-  if (isLoading || !isAuthenticated) {
+  if (isLoading && !user) {
     return (
       <div className="min-h-screen bg-cyber-bg flex items-center justify-center font-orbitron">
         <div className="text-cyber-cyan text-[11px] tracking-widest uppercase animate-pulse">

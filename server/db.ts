@@ -17,6 +17,7 @@ if (!process.env.DATABASE_URL) {
 
 export const pool = new Pool({
   connectionString,
+  connectionTimeoutMillis: 4000,
   // If running on Replit or Render/Heroku, they often require SSL for external database connections.
   ssl: process.env.DATABASE_URL && !connectionString.includes('localhost')
     ? { rejectUnauthorized: false }

@@ -42,37 +42,64 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const { data, isLoading } = useQuery({
     queryKey: ['me'],
     queryFn: async () => {
-      const res = await fetch('/api/me');
-      if (!res.ok) throw new Error('Failed to fetch auth state');
-      return res.json();
+      try {
+        const res = await fetch('/api/me');
+        if (!res.ok) throw new Error('Failed to fetch auth state');
+        return await res.json();
+      } catch (err) {
+        console.warn('Auth state fetch warning:', err);
+        return null;
+      }
     },
-    refetchInterval: 5000 // Keep user profile/scores in sync
+    refetchInterval: 5000,
+    retry: 2
   });
 
-  const isAuthenticated = !!(data && data.authenticated && data.user);
-  const user = isAuthenticated ? data.user : null;
-  const profile = isAuthenticated ? data.profile : null;
+  // Local persistent guest bootstrap fallback
+  const localGuestId = (() => {
+    let id = localStorage.getItem('device_player_id') || localStorage.getItem('dev_user_id');
+    if (!id) {
+      id = 'player_' + Math.random().toString(36).substring(2, 9);
+      localStorage.setItem('device_player_id', id);
+      localStorage.setItem('dev_user_id', id);
+    }
+    return id;
+  })();
+
+  const guestFallbackUser: User = {
+    id: localGuestId,
+    email: `${localGuestId}@bounty.com`,
+    name: localGuestId.replace(/^player_/, 'Runner_'),
+    avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${localGuestId}`
+  };
+
+  const guestFallbackProfile: Profile = {
+    id: localGuestId,
+    lat: 59.9139,
+    lng: 10.7522,
+    score: 0,
+    bountyActive: false,
+    isSpecial: false,
+    isDark: false,
+    updatedAt: new Date().toISOString()
+  };
+
+  const hasServerUser = !!(data && data.authenticated && data.user);
+  const user: User = hasServerUser ? data.user : guestFallbackUser;
+  const profile: Profile = (hasServerUser && data.profile) ? data.profile : guestFallbackProfile;
+  const isAuthenticated = true;
 
   const isCloudStored = localStorage.getItem('is_cloud_account') === 'true';
-  const isGuest = !user || (!isCloudStored && (user.id.startsWith('player_') || user.id.startsWith('guest_')));
+  const isGuest = !hasServerUser || (!isCloudStored && (user.id.startsWith('player_') || user.id.startsWith('guest_')));
 
   // Sync localStorage with API response
   React.useEffect(() => {
     if (data) {
       if (data.authenticated && data.user?.id) {
         localStorage.setItem('dev_user_id', data.user.id);
-      } else if (!data.authenticated) {
-        // Automatically restore local guest ID so the user is never locked out
-        let guestId = localStorage.getItem('device_player_id');
-        if (!guestId) {
-          guestId = 'player_' + Math.random().toString(36).substring(2, 9);
-          localStorage.setItem('device_player_id', guestId);
-        }
-        localStorage.setItem('dev_user_id', guestId);
-        queryClient.invalidateQueries({ queryKey: ['me'] });
       }
     }
-  }, [data, queryClient]);
+  }, [data]);
 
   // Mutation: Dev login
   const loginMutation = useMutation({
