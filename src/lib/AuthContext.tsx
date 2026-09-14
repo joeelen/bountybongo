@@ -27,6 +27,7 @@ interface AuthContextType {
   isLoading: boolean;
   login: (credentials: { username: string; password?: string }) => Promise<any>;
   register: (credentials: { username: string; password: string; email?: string; transferScore?: boolean }) => Promise<any>;
+  oauthLogin: (credentials: { provider: 'google' | 'apple'; email: string; name?: string; avatar?: string; providerId?: string; transferScore?: number }) => Promise<any>;
   devLogin: (username: string) => Promise<any>;
   authLogin: (credentials: { id?: string; username?: string; password?: string; email?: string; name?: string; avatar?: string; transferScore?: number }) => Promise<any>;
   linkCloudAccount: (credentials: { username: string; password?: string; email?: string; transferScore?: boolean }) => Promise<any>;
@@ -231,6 +232,39 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   });
 
+  // Mutation: OAuth (Google / Apple)
+  const oauthLoginMutation = useMutation({
+    mutationFn: async (credentials: { provider: 'google' | 'apple'; email: string; name?: string; avatar?: string; providerId?: string; transferScore?: number }) => {
+      const res = await fetch('/api/auth/oauth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(credentials)
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Sky-innlogging feilet');
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      if (data?.user?.id) {
+        localStorage.setItem('dev_user_id', data.user.id);
+        localStorage.setItem('is_cloud_account', 'true');
+        if (data.user.email) {
+          localStorage.setItem('last_oauth_email', data.user.email);
+        }
+        localStorage.setItem('bounty_account', JSON.stringify({
+          id: data.user.id,
+          name: data.user.name,
+          email: data.user.email,
+          avatar: data.user.avatar,
+          score: data.profile?.score ?? 0
+        }));
+      }
+      queryClient.invalidateQueries({ queryKey: ['me'] });
+    }
+  });
+
   const devLogin = async (username: string) => {
     return loginMutation.mutateAsync(username);
   };
@@ -247,6 +281,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       email,
       transferScore: currentScore
     });
+  };
+
+  const oauthLogin = async (credentials: { provider: 'google' | 'apple'; email: string; name?: string; avatar?: string; providerId?: string; transferScore?: number }) => {
+    return oauthLoginMutation.mutateAsync(credentials);
   };
 
   const authLogin = async (credentials: { id?: string; username?: string; password?: string; email?: string; name?: string; avatar?: string; transferScore?: number }) => {
@@ -303,6 +341,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       isLoading,
       login,
       register,
+      oauthLogin,
       devLogin,
       authLogin,
       linkCloudAccount,

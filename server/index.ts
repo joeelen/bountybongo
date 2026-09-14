@@ -407,7 +407,7 @@ app.post('/api/dev-login', (req, res) => {
   res.json({ success: true, username: cleanUsername });
 });
 
-// POST: Register a new account with Username & Password
+// POST: Register a new account with Username, Password and optional real Email
 app.post('/api/auth/register', async (req: any, res: any) => {
   const { username, password, email, name, avatar, transferScore } = req.body;
 
@@ -421,7 +421,11 @@ app.post('/api/auth/register', async (req: any, res: any) => {
   const cleanUsername = username.trim();
   const cleanId = cleanUsername.toLowerCase().replace(/\s+/g, '_');
   const cleanName = (name || cleanUsername).trim();
-  const cleanEmail = (email || `${cleanId}@bounty.com`).trim().toLowerCase();
+  const trimmedEmail = email && typeof email === 'string' ? email.trim().toLowerCase() : '';
+  if (trimmedEmail && !trimmedEmail.includes('@')) {
+    return res.status(400).json({ error: 'Ugyldig e-postadresse.' });
+  }
+  const cleanEmail = trimmedEmail || `${cleanId}@bounty.com`;
   const cleanAvatar = avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${cleanId}`;
   const initialScore = (typeof transferScore === 'number' && transferScore > 0) ? Math.floor(transferScore) : 0;
 
@@ -430,10 +434,14 @@ app.post('/api/auth/register', async (req: any, res: any) => {
       const existingUser = await db.query.users.findFirst({
         where: or(
           eq(users.id, cleanId),
-          sql`lower(${users.name}) = ${cleanName.toLowerCase()}`
+          sql`lower(${users.name}) = ${cleanName.toLowerCase()}`,
+          trimmedEmail ? eq(users.email, trimmedEmail) : sql`false`
         )
       });
       if (existingUser) {
+        if (trimmedEmail && existingUser.email === trimmedEmail) {
+          return res.status(409).json({ error: `E-postadressen '${trimmedEmail}' er allerede registrert. Vennligst logg inn.` });
+        }
         return res.status(409).json({ error: `Brukernavnet '${cleanUsername}' er allerede i bruk. Vennligst logg inn eller velg et annet.` });
       }
 
@@ -465,14 +473,21 @@ app.post('/api/auth/register', async (req: any, res: any) => {
     }
   } else {
     // Memory fallback
-    let conflict = false;
+    let conflictUser: any = null;
     mockUsers.forEach(u => {
-      if (u.id.toLowerCase() === cleanId || (u.name && u.name.toLowerCase() === cleanName.toLowerCase())) {
-        conflict = true;
+      if (
+        u.id.toLowerCase() === cleanId ||
+        (u.name && u.name.toLowerCase() === cleanName.toLowerCase()) ||
+        (trimmedEmail && u.email && u.email.toLowerCase() === trimmedEmail)
+      ) {
+        conflictUser = u;
       }
     });
 
-    if (conflict) {
+    if (conflictUser) {
+      if (trimmedEmail && conflictUser.email && conflictUser.email.toLowerCase() === trimmedEmail) {
+        return res.status(409).json({ error: `E-postadressen '${trimmedEmail}' er allerede registrert. Vennligst logg inn.` });
+      }
       return res.status(409).json({ error: `Brukernavnet '${cleanUsername}' er allerede i bruk. Vennligst logg inn eller velg et annet.` });
     }
 
@@ -501,20 +516,19 @@ app.post('/api/auth/register', async (req: any, res: any) => {
   }
 });
 
-// POST: Login with Username/Password, Email or OAuth provider
+// POST: Login with Username/Email and Password
 app.post('/api/auth/login', async (req: any, res) => {
   const { id, email, name, username, password, avatar, transferScore } = req.body;
   
-  const rawId = (username || id || name || '').trim();
-  const cleanId = rawId.toLowerCase().replace(/\s+/g, '_');
-  const cleanName = (name || username || rawId).trim();
-  const cleanEmail = (email || (cleanId ? `${cleanId}@bounty.com` : '')).trim().toLowerCase();
-  const cleanAvatar = avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${cleanId}`;
-
-  if (!cleanId && !cleanEmail) {
+  const rawInput = (username || id || name || email || '').trim();
+  if (!rawInput) {
     return res.status(400).json({ error: 'Brukernavn eller e-post er påkrevd.' });
   }
 
+  const isEmailInput = rawInput.includes('@');
+  const searchEmail = isEmailInput ? rawInput.toLowerCase() : (email ? email.trim().toLowerCase() : '');
+  const cleanId = rawInput.toLowerCase().replace(/\s+/g, '_');
+  const cleanName = rawInput.toLowerCase();
   const bonusScore = (typeof transferScore === 'number' && transferScore > 0) ? Math.floor(transferScore) : 0;
 
   if (isDbConnected) {
@@ -522,45 +536,52 @@ app.post('/api/auth/login', async (req: any, res) => {
       let userRow = await db.query.users.findFirst({
         where: or(
           eq(users.id, cleanId),
-          sql`lower(${users.name}) = ${cleanName.toLowerCase()}`,
-          cleanEmail ? eq(users.email, cleanEmail) : sql`false`
+          sql`lower(${users.name}) = ${cleanName}`,
+          searchEmail ? eq(users.email, searchEmail) : sql`false`
         )
       });
 
-      // If user provided a password and account exists, verify it
-      if (userRow && password && userRow.password && userRow.password !== password) {
-        return res.status(401).json({ error: 'Feil passord. Vennligst prøv igjen.' });
+      // If user exists and password is provided, verify password
+      if (userRow) {
+        if (userRow.password && password && userRow.password !== password) {
+          return res.status(401).json({ error: 'Feil passord. Vennligst prøv igjen.' });
+        }
+        if (bonusScore > 0) {
+          await db.update(profiles)
+            .set({ score: sql`${profiles.score} + ${bonusScore}` })
+            .where(eq(profiles.id, userRow.id));
+        }
+        const profileRow = await db.query.profiles.findFirst({ where: eq(profiles.id, userRow.id) });
+        res.cookie('dev-user-id', userRow.id, getCookieOptions(req));
+        return res.json({ success: true, user: userRow, profile: profileRow });
       }
 
-      // If user is logging in with credentials but account doesn't exist:
-      if (!userRow && password) {
-        return res.status(401).json({ error: `Fant ingen konto for '${cleanName}'. Vennligst opprett en konto først.` });
+      // If user was not found and password was submitted:
+      if (password) {
+        return res.status(401).json({ error: `Fant ingen konto for '${rawInput}'. Vennligst sjekk skrivemåten eller opprett en konto først.` });
       }
 
-      if (!userRow) {
-        await db.insert(users).values({
-          id: cleanId,
-          email: cleanEmail || `${cleanId}@bounty.com`,
-          name: cleanName || cleanId,
-          avatar: cleanAvatar,
-          password: password || null
-        });
-        await db.insert(profiles).values({
-          id: cleanId,
-          lat: 59.9139,
-          lng: 10.7522,
-          score: bonusScore,
-          bountyActive: false,
-          isSpecial: false,
-          isDark: false
-        });
-        userRow = { id: cleanId, email: cleanEmail, name: cleanName, avatar: cleanAvatar };
-      } else if (bonusScore > 0) {
-        await db.update(profiles)
-          .set({ score: sql`${profiles.score} + ${bonusScore}` })
-          .where(eq(profiles.id, userRow.id));
-      }
-
+      // Legacy fallback for developer quick login (no password provided):
+      const fallbackEmail = searchEmail || `${cleanId}@bounty.com`;
+      const fallbackName = name || rawInput;
+      const cleanAvatar = avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${cleanId}`;
+      await db.insert(users).values({
+        id: cleanId,
+        email: fallbackEmail,
+        name: fallbackName,
+        avatar: cleanAvatar,
+        password: null
+      });
+      await db.insert(profiles).values({
+        id: cleanId,
+        lat: 59.9139,
+        lng: 10.7522,
+        score: bonusScore,
+        bountyActive: false,
+        isSpecial: false,
+        isDark: false
+      });
+      userRow = { id: cleanId, email: fallbackEmail, name: fallbackName, avatar: cleanAvatar };
       const profileRow = await db.query.profiles.findFirst({ where: eq(profiles.id, userRow.id) });
       res.cookie('dev-user-id', userRow.id, getCookieOptions(req));
       return res.json({ success: true, user: userRow, profile: profileRow });
@@ -574,29 +595,147 @@ app.post('/api/auth/login', async (req: any, res) => {
     mockUsers.forEach(u => {
       if (
         u.id.toLowerCase() === cleanId ||
-        (u.name && u.name.toLowerCase() === cleanName.toLowerCase()) ||
-        (cleanEmail && u.email && u.email.toLowerCase() === cleanEmail)
+        (u.name && u.name.toLowerCase() === cleanName) ||
+        (searchEmail && u.email && u.email.toLowerCase() === searchEmail)
       ) {
         existingUser = u;
       }
     });
 
-    if (existingUser && password && existingUser.password && existingUser.password !== password) {
-      return res.status(401).json({ error: 'Feil passord. Vennligst prøv igjen.' });
+    if (existingUser) {
+      if (existingUser.password && password && existingUser.password !== password) {
+        return res.status(401).json({ error: 'Feil passord. Vennligst prøv igjen.' });
+      }
+      if (bonusScore > 0) {
+        const prof = mockProfiles.get(existingUser.id);
+        if (prof) {
+          prof.score = (prof.score || 0) + bonusScore;
+        }
+      }
+      const currentProfile = mockProfiles.get(existingUser.id);
+      res.cookie('dev-user-id', existingUser.id, getCookieOptions(req));
+      return res.json({ success: true, user: existingUser, profile: currentProfile });
     }
 
-    if (!existingUser && password) {
-      return res.status(401).json({ error: `Fant ingen konto for '${cleanName}'. Vennligst opprett en konto først.` });
+    if (password) {
+      return res.status(401).json({ error: `Fant ingen konto for '${rawInput}'. Vennligst sjekk skrivemåten eller opprett en konto først.` });
     }
 
-    if (!existingUser) {
-      mockUsers.set(cleanId, {
-        id: cleanId,
-        email: cleanEmail || `${cleanId}@bounty.com`,
-        name: cleanName || cleanId,
-        avatar: cleanAvatar,
-        password: password || undefined
+    // Quick creation if no password specified
+    const fallbackEmail = searchEmail || `${cleanId}@bounty.com`;
+    const fallbackName = name || rawInput;
+    const cleanAvatar = avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${cleanId}`;
+    const newUser = {
+      id: cleanId,
+      email: fallbackEmail,
+      name: fallbackName,
+      avatar: cleanAvatar,
+      password: undefined
+    };
+    mockUsers.set(cleanId, newUser);
+    mockProfiles.set(cleanId, {
+      id: cleanId,
+      lat: 59.9139,
+      lng: 10.7522,
+      score: bonusScore,
+      bountyActive: false,
+      isSpecial: false,
+      isDark: false,
+      updatedAt: new Date()
+    });
+    res.cookie('dev-user-id', cleanId, getCookieOptions(req));
+    return res.json({ success: true, user: newUser, profile: mockProfiles.get(cleanId) });
+  }
+});
+
+// POST: Dedicated OAuth / Quick Social Auth (Google, Apple) with real persistent email
+app.post('/api/auth/oauth', async (req: any, res) => {
+  const { provider, email, name, avatar, providerId, transferScore } = req.body;
+
+  if (!provider || (provider !== 'google' && provider !== 'apple')) {
+    return res.status(400).json({ error: 'Ugyldig autentiseringsleverandør.' });
+  }
+
+  if (!email || typeof email !== 'string' || !email.includes('@')) {
+    return res.status(400).json({ error: 'En gyldig e-postadresse er påkrevd for sky-innlogging.' });
+  }
+
+  const cleanEmail = email.trim().toLowerCase();
+  // Generate consistent permanent ID based on email or providerId
+  const emailPrefix = cleanEmail.split('@')[0].replace(/[^a-z0-9_]/g, '_');
+  const cleanId = providerId ? `${provider}_${providerId}` : `${provider}_${emailPrefix}`;
+  const displayName = (name && typeof name === 'string' && name.trim()) 
+    ? name.trim() 
+    : (emailPrefix.charAt(0).toUpperCase() + emailPrefix.slice(1));
+  const userAvatar = avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${cleanEmail}`;
+  const bonusScore = (typeof transferScore === 'number' && transferScore > 0) ? Math.floor(transferScore) : 0;
+
+  if (isDbConnected) {
+    try {
+      // Find existing user by exact email or provider ID
+      let userRow = await db.query.users.findFirst({
+        where: or(
+          eq(users.email, cleanEmail),
+          eq(users.id, cleanId)
+        )
       });
+
+      let isNew = false;
+      if (!userRow) {
+        isNew = true;
+        await db.insert(users).values({
+          id: cleanId,
+          email: cleanEmail,
+          name: displayName,
+          avatar: userAvatar,
+          password: null
+        });
+        await db.insert(profiles).values({
+          id: cleanId,
+          lat: 59.9139,
+          lng: 10.7522,
+          score: bonusScore,
+          bountyActive: false,
+          isSpecial: false,
+          isDark: false
+        });
+        userRow = { id: cleanId, email: cleanEmail, name: displayName, avatar: userAvatar };
+      } else if (bonusScore > 0) {
+        await db.update(profiles)
+          .set({ score: sql`${profiles.score} + ${bonusScore}` })
+          .where(eq(profiles.id, userRow.id));
+      }
+
+      const profileRow = await db.query.profiles.findFirst({ where: eq(profiles.id, userRow.id) });
+      res.cookie('dev-user-id', userRow.id, getCookieOptions(req));
+      return res.json({ success: true, user: userRow, profile: profileRow, isNewUser: isNew });
+    } catch (err: any) {
+      console.error('OAuth DB error:', err);
+      return res.status(500).json({ error: 'Database authentication failed' });
+    }
+  } else {
+    // Memory fallback
+    let existingUser: any = null;
+    mockUsers.forEach(u => {
+      if (
+        (u.email && u.email.toLowerCase() === cleanEmail) ||
+        u.id.toLowerCase() === cleanId
+      ) {
+        existingUser = u;
+      }
+    });
+
+    let isNew = false;
+    if (!existingUser) {
+      isNew = true;
+      existingUser = {
+        id: cleanId,
+        email: cleanEmail,
+        name: displayName,
+        avatar: userAvatar,
+        password: undefined
+      };
+      mockUsers.set(cleanId, existingUser);
       mockProfiles.set(cleanId, {
         id: cleanId,
         lat: 59.9139,
@@ -607,7 +746,6 @@ app.post('/api/auth/login', async (req: any, res) => {
         isDark: false,
         updatedAt: new Date()
       });
-      existingUser = mockUsers.get(cleanId);
     } else if (bonusScore > 0) {
       const prof = mockProfiles.get(existingUser.id);
       if (prof) {
@@ -617,7 +755,7 @@ app.post('/api/auth/login', async (req: any, res) => {
 
     const currentProfile = mockProfiles.get(existingUser.id);
     res.cookie('dev-user-id', existingUser.id, getCookieOptions(req));
-    return res.json({ success: true, user: existingUser, profile: currentProfile });
+    return res.json({ success: true, user: existingUser, profile: currentProfile, isNewUser: isNew });
   }
 });
 
@@ -2664,7 +2802,11 @@ app.post('/api/social/friends/request', async (req: any, res) => {
       status: 'pending'
     });
 
-    res.json({ success: true, targetUser: { id: targetUser.id, name: targetUser.name } });
+    res.json({ 
+      success: true, 
+      message: `Friend request transmitted to ${targetUser.name}`,
+      targetUser: { id: targetUser.id, name: targetUser.name } 
+    });
   } else {
     let targetUser: any = null;
     mockUsers.forEach(u => {
@@ -2703,7 +2845,11 @@ app.post('/api/social/friends/request', async (req: any, res) => {
       status: 'pending'
     });
 
-    res.json({ success: true, targetUser: { id: targetUser.id, name: targetUser.name } });
+    res.json({ 
+      success: true, 
+      message: `Friend request transmitted to ${targetUser.name}`,
+      targetUser: { id: targetUser.id, name: targetUser.name } 
+    });
   }
 });
 

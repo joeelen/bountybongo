@@ -33,12 +33,13 @@ async function main() {
     process.exit(1);
   }
 
-  // Execute Empirical Milestone Test Suites
+  // Execute Empirical Milestone & Auth Test Suites
   const milestoneSuites = [
     'tests/m2_party_modes.test.js',
     'tests/m2_spatial_collectibles_challenge.test.js',
     'tests/m3_powerups.test.js',
-    'tests/m4_gamification.test.js'
+    'tests/m4_gamification.test.js',
+    'tests/auth_persistence.test.js'
   ];
 
   for (const suite of milestoneSuites) {
