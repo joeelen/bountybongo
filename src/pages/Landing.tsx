@@ -396,7 +396,7 @@ const Landing: React.FC = () => {
           )}
 
           {/* Divider */}
-          <div className="flex items-center my-5 text-[9px] font-bold text-zinc-500 uppercase tracking-widest">
+          <div className="flex items-center my-5 text-[10px] font-bold text-zinc-500 uppercase tracking-widest">
             <div className="flex-1 h-[1px] bg-zinc-800"></div>
             <span className="px-3">eller spill direkte</span>
             <div className="flex-1 h-[1px] bg-zinc-800"></div>
@@ -432,18 +432,18 @@ const Landing: React.FC = () => {
             </button>
           </div>
 
-          {/* Quick presets for developers */}
+          {/* Quick presets for developers (2-col on 360px mobile, 4-col on desktop, comfortable touch targets) */}
           <div className="mt-6 border-t border-zinc-900 pt-4">
-            <span className="block text-[9px] text-zinc-500 uppercase font-black tracking-wider mb-2 text-center">
+            <span className="block text-[10px] text-zinc-500 uppercase font-black tracking-wider mb-2 text-center">
               Hurtigvalg for testing (Presets)
             </span>
-            <div className="grid grid-cols-4 gap-1.5">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               {['host', 'hider1', 'hider2', 'seeker1'].map((preset) => (
                 <button
                   key={preset}
                   onClick={() => handleQuickLogin(preset)}
                   disabled={loading}
-                  className="py-1.5 rounded bg-zinc-900/60 border border-zinc-800 hover:border-cyber-cyan/50 text-[10px] font-black text-zinc-400 hover:text-cyber-cyan transition-all uppercase font-mono"
+                  className="min-h-[40px] py-2 px-3 rounded-lg bg-zinc-900/60 border border-zinc-800 hover:border-cyber-cyan/50 text-xs font-black text-zinc-400 hover:text-cyber-cyan transition-all uppercase font-mono flex items-center justify-center active:scale-95"
                 >
                   {preset}
                 </button>
@@ -525,7 +525,7 @@ const Landing: React.FC = () => {
             </div>
 
             <div className="w-full flex flex-col gap-1 text-left mb-4">
-              <label className="text-[9px] text-zinc-500 uppercase font-black">Apple ID E-post</label>
+              <label className="text-[10px] text-zinc-500 uppercase font-black">Apple ID E-post</label>
               <input
                 type="email"
                 value={appleEmailInput}

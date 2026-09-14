@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../lib/AuthContext';
-import { UserPlus, UserCheck, MessageSquare, Send, RefreshCw, Radio, ChevronRight, Copy, Check, Cloud } from 'lucide-react';
+import { UserPlus, UserCheck, MessageSquare, Send, RefreshCw, Radio, ChevronRight, ChevronLeft, Copy, Check, Cloud } from 'lucide-react';
 import { CloudAuthModal } from '../components/CloudAuthModal';
 
 const Social: React.FC = () => {
@@ -16,6 +16,7 @@ const Social: React.FC = () => {
   
   const [activeFriendId, setActiveFriendId] = useState<string | null>(null);
   const [chatInput, setChatInput] = useState('');
+  const [mobileTab, setMobileTab] = useState<'friends' | 'chat'>('friends');
 
   // Query: Get friends list (Drizzle ORM backend)
   const { data: friendsList = [], isLoading: isLoadingFriends, refetch: refetchFriends } = useQuery({
@@ -123,17 +124,45 @@ const Social: React.FC = () => {
   const activeFriendObj = friendsList.find((f: any) => f.friend.id === activeFriendId);
 
   return (
-    <div className="flex-1 w-full h-full grid-bg p-4 flex flex-col items-center pt-8 overflow-y-auto md:overflow-hidden font-rajdhani pb-24 md:pb-8">
+    <div className="flex-1 w-full h-full grid-bg p-4 flex flex-col items-center pt-6 md:pt-8 overflow-y-auto md:overflow-hidden font-rajdhani pb-24 md:pb-8">
+      {/* Mobile Segmented View Switcher */}
+      <div className="md:hidden flex w-full max-w-5xl mb-3 bg-zinc-950/80 p-1 rounded-xl border border-cyber-cyan/20">
+        <button
+          type="button"
+          onClick={() => setMobileTab('friends')}
+          className={`flex-1 min-h-[40px] py-1.5 px-3 rounded-lg text-xs font-bold font-orbitron uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
+            mobileTab === 'friends'
+              ? 'bg-cyber-cyan text-zinc-950 shadow-cyan-glow/20'
+              : 'text-zinc-400 hover:text-white'
+          }`}
+        >
+          <UserCheck className="w-3.5 h-3.5" />
+          Network ({acceptedFriends.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setMobileTab('chat')}
+          className={`flex-1 min-h-[40px] py-1.5 px-3 rounded-lg text-xs font-bold font-orbitron uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
+            mobileTab === 'chat'
+              ? 'bg-cyber-cyan text-zinc-950 shadow-cyan-glow/20'
+              : 'text-zinc-400 hover:text-white'
+          }`}
+        >
+          <MessageSquare className="w-3.5 h-3.5" />
+          Comms {activeFriendObj ? `(${activeFriendObj.friend.name})` : ''}
+        </button>
+      </div>
+
       <div className="w-full max-w-5xl h-auto md:h-[85vh] flex flex-col md:flex-row gap-6">
         
         {/* Left column: Friends List & Invites */}
-        <div className="w-full md:w-80 h-full flex flex-col gap-4">
+        <div className={`w-full md:w-80 h-full flex flex-col gap-4 ${mobileTab === 'friends' ? 'flex' : 'hidden md:flex'}`}>
 
           {/* Your Player Identity & Tag */}
           <div className="cyber-card p-4 border-cyber-cyan/30 flex flex-col gap-2.5">
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-black uppercase text-zinc-400 tracking-wider font-orbitron">Your Identity</span>
-              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border uppercase font-mono ${
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border uppercase font-mono ${
                 isGuest ? 'bg-cyber-yellow/10 border-cyber-yellow/30 text-cyber-yellow' : 'bg-cyber-green/10 border-cyber-green/30 text-cyber-green'
               }`}>
                 {isGuest ? 'Guest Tag' : 'Cloud Synced'}
@@ -177,7 +206,7 @@ const Social: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setAuthModalOpen(true)}
-                  className="px-2 py-1 bg-cyber-yellow hover:bg-white text-zinc-950 font-black text-[9px] uppercase rounded shrink-0 transition-colors"
+                  className="px-2.5 py-1 bg-cyber-yellow hover:bg-white text-zinc-950 font-black text-[10px] uppercase rounded shrink-0 transition-colors"
                 >
                   Sync
                 </button>
@@ -258,7 +287,10 @@ const Social: React.FC = () => {
                 acceptedFriends.map((f: any) => (
                   <button
                     key={f.id}
-                    onClick={() => setActiveFriendId(f.friend.id)}
+                    onClick={() => {
+                      setActiveFriendId(f.friend.id);
+                      setMobileTab('chat');
+                    }}
                     className={`w-full flex items-center justify-between p-2 rounded border transition-all text-left ${
                       activeFriendId === f.friend.id
                         ? 'bg-cyber-cyan/15 border-cyber-cyan text-cyber-cyan'
@@ -282,12 +314,20 @@ const Social: React.FC = () => {
         </div>
 
         {/* Right column: Chat Log (1-on-1 Messages) */}
-        <div className="flex-1 h-full cyber-card p-4 border-cyber-cyan/20 flex flex-col gap-4 overflow-hidden">
+        <div className={`flex-1 h-full cyber-card p-4 border-cyber-cyan/20 flex flex-col gap-4 overflow-hidden ${mobileTab === 'chat' ? 'flex' : 'hidden md:flex'}`}>
           {activeFriendId && activeFriendObj ? (
             <>
               {/* Active Friend Header */}
               <div className="flex items-center justify-between border-b border-cyber-border pb-2.5">
                 <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setMobileTab('friends')}
+                    className="md:hidden p-1.5 rounded bg-zinc-900 border border-zinc-800 text-cyber-cyan hover:text-white mr-1"
+                    title="Back to Network"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
                   <img src={activeFriendObj.friend.avatar} alt="" className="w-8 h-8 rounded-full border border-cyber-cyan/30" />
                   <div className="flex flex-col">
                     <span className="text-sm font-black uppercase text-cyber-cyan tracking-wider">{activeFriendObj.friend.name}</span>
@@ -321,7 +361,7 @@ const Social: React.FC = () => {
                             : 'bg-zinc-900 border border-cyber-border self-start text-left'
                         }`}
                       >
-                        <span className={`text-[8px] font-black uppercase mb-1 ${isOwn ? 'text-cyber-cyan/80' : 'text-zinc-500'}`}>
+                        <span className={`text-[10px] font-black uppercase mb-1 ${isOwn ? 'text-cyber-cyan/80' : 'text-zinc-500'}`}>
                           {isOwn ? 'YOU' : activeFriendObj.friend.name}
                         </span>
                         <span className="text-zinc-300 break-words">{msg.content}</span>

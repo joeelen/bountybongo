@@ -60,8 +60,8 @@ const Leaderboard: React.FC = () => {
           </div>
         )}
 
-        {/* Tier legend */}
-        <div className="grid grid-cols-5 gap-1.5 text-center">
+        {/* Tier legend: 3+2 wrap on mobile to prevent "OPERATIVE" line wrapping, 5-col on desktop */}
+        <div className="flex flex-wrap sm:grid sm:grid-cols-5 gap-1.5 text-center">
           {[
             { label: 'Apex', color: 'text-cyber-red', threshold: '1000+' },
             { label: 'Legend', color: 'text-cyber-yellow', threshold: '500+' },
@@ -69,9 +69,9 @@ const Leaderboard: React.FC = () => {
             { label: 'Operative', color: 'text-zinc-300', threshold: '50+' },
             { label: 'Novice', color: 'text-zinc-500', threshold: '0+' },
           ].map(tier => (
-            <div key={tier.label} className="flex flex-col items-center bg-zinc-950/40 border border-zinc-900 rounded p-1.5">
-              <span className={`text-[9px] font-black uppercase ${tier.color}`}>{tier.label}</span>
-              <span className="text-[8px] text-zinc-600 font-mono">{tier.threshold} XP</span>
+            <div key={tier.label} className="flex-1 min-w-[90px] sm:min-w-0 flex flex-col items-center bg-zinc-950/40 border border-zinc-900 rounded p-1.5">
+              <span className={`text-[10px] font-black uppercase ${tier.color} whitespace-nowrap`}>{tier.label}</span>
+              <span className="text-[10px] text-zinc-500 font-mono">{tier.threshold} XP</span>
             </div>
           ))}
         </div>
@@ -128,7 +128,7 @@ const Leaderboard: React.FC = () => {
                         <div className="flex flex-col min-w-0">
                           <span className={`text-sm font-bold truncate ${isMe ? 'text-cyber-cyan' : rank <= 3 ? 'text-white' : 'text-zinc-400'}`}>
                             {leader.name}
-                            {isMe && <span className="ml-1.5 text-[8px] bg-cyber-cyan/10 text-cyber-cyan px-1 rounded border border-cyber-cyan/30">YOU</span>}
+                            {isMe && <span className="ml-1.5 text-[10px] bg-cyber-cyan/10 text-cyber-cyan px-1.5 py-0.5 rounded border border-cyber-cyan/30 font-bold shrink-0">YOU</span>}
                           </span>
                           <span className={`text-[10px] flex items-center gap-1 ${tier.color}`}>
                             {tier.icon}

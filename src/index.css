@@ -140,3 +140,133 @@
 .pulse-slow {
   animation: cyber-pulse 3s infinite;
 }
+
+/* ==========================================================================
+   OUTDOOR BRIGHT MODE STYLES (High Sunlight Contrast)
+   ========================================================================== */
+
+/* 1. Leaflet Container Daylight Canvas Background */
+.theme-bright .leaflet-container {
+  background: #e2e8f0 !important;
+}
+
+/* 2. Disable Dark CRT Scanline Overlay in Bright Mode */
+.theme-bright .scanlines {
+  display: none !important;
+}
+
+/* 3. High-Contrast Daylight Glassmorphic Cards */
+.theme-bright .cyber-card {
+  background: rgba(255, 255, 255, 0.94) !important;
+  backdrop-filter: blur(16px) !important;
+  -webkit-backdrop-filter: blur(16px) !important;
+  border: 1px solid rgba(14, 116, 144, 0.35) !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08) !important;
+  color: #0f172a !important;
+}
+
+.theme-bright .cyber-card-red {
+  background: rgba(255, 255, 255, 0.94) !important;
+  backdrop-filter: blur(16px) !important;
+  -webkit-backdrop-filter: blur(16px) !important;
+  border: 1px solid rgba(225, 29, 72, 0.4) !important;
+  box-shadow: 0 4px 20px rgba(225, 29, 72, 0.1) !important;
+  color: #0f172a !important;
+}
+
+/* 4. Body & Global Shell Bright Background */
+.theme-bright body,
+html.theme-bright body {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+}
+
+.theme-bright header {
+  background-color: rgba(255, 255, 255, 0.92) !important;
+  border-bottom-color: rgba(2, 132, 199, 0.25) !important;
+}
+
+.theme-bright nav {
+  background-color: rgba(255, 255, 255, 0.96) !important;
+  border-top-color: rgba(2, 132, 199, 0.2) !important;
+}
+
+/* 5. Daytime High-Contrast Marker Borders & Saturated Centers */
+.theme-bright .own-gps-icon .rounded-full.bg-cyber-cyan.border-2 {
+  background-color: #0284c7 !important;
+  border-color: #020617 !important;
+  border-width: 2.5px !important;
+  box-shadow: 0 0 10px rgba(2, 132, 199, 0.8) !important;
+}
+.theme-bright .own-gps-icon .animate-ping {
+  background-color: #0284c7 !important;
+  opacity: 0.6 !important;
+}
+
+.theme-bright .hider-gps-icon .rounded-full.bg-cyber-yellow.border-2 {
+  background-color: #d97706 !important; /* Amber-600 */
+  border-color: #020617 !important;
+  border-width: 2.5px !important;
+  box-shadow: 0 0 10px rgba(217, 119, 6, 0.8) !important;
+}
+.theme-bright .hider-gps-icon .animate-ping {
+  background-color: #d97706 !important;
+  opacity: 0.6 !important;
+}
+
+.theme-bright .hunter-gps-icon .rounded-full.bg-cyber-orange {
+  background-color: #ea580c !important; /* Orange-600 */
+  border: 2.5px solid #020617 !important;
+  box-shadow: 0 0 10px rgba(234, 88, 12, 0.8) !important;
+}
+.theme-bright .hunter-gps-icon .animate-ping {
+  background-color: #ea580c !important;
+  opacity: 0.6 !important;
+}
+
+.theme-bright .special-gps-icon .rounded-full.bg-cyber-red.border-2 {
+  background-color: #dc2626 !important;
+  border-color: #020617 !important;
+  border-width: 2.5px !important;
+  box-shadow: 0 0 12px rgba(220, 38, 38, 0.9) !important;
+}
+
+/* 6. Leaflet Controls & Popups in Bright Mode */
+.theme-bright .leaflet-bar {
+  border: 1px solid rgba(2, 132, 199, 0.4) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
+}
+
+.theme-bright .leaflet-bar a {
+  background-color: #ffffff !important;
+  color: #0284c7 !important;
+  border-bottom: 1px solid #e2e8f0 !important;
+}
+
+.theme-bright .leaflet-bar a:hover {
+  background-color: #0284c7 !important;
+  color: #ffffff !important;
+}
+
+.theme-bright .leaflet-popup-content-wrapper {
+  background: #ffffff !important;
+  color: #0f172a !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15) !important;
+  border: 1px solid rgba(2, 132, 199, 0.3) !important;
+}
+
+.theme-bright .leaflet-popup-tip {
+  background: #ffffff !important;
+}
+
+/* 7. Scrollbars in Bright Mode */
+.theme-bright ::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+.theme-bright ::-webkit-scrollbar-thumb {
+  background: rgba(2, 132, 199, 0.3);
+}
+.theme-bright ::-webkit-scrollbar-thumb:hover {
+  background: #0284c7;
+}
+

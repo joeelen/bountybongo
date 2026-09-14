@@ -153,7 +153,7 @@ export const CloudAuthModal: React.FC<CloudAuthModalProps> = ({
             </div>
             <div className="flex flex-col items-end">
               <span className="text-xs font-mono font-black text-cyber-yellow glow-yellow">{currentScore} XP</span>
-              <span className="text-[9px] text-zinc-500 uppercase font-black">Score</span>
+              <span className="text-[10px] text-zinc-500 uppercase font-black">Score</span>
             </div>
           </div>
 

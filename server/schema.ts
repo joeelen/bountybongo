@@ -27,6 +27,8 @@ export const matches = pgTable('matches', {
   id: text('id').primaryKey(), // 6-character invite code
   hostId: text('host_id').notNull().references(() => users.id),
   status: text('status').default('waiting').notNull(), // 'waiting' | 'hiding' | 'hunting' | 'finished'
+  gameMode: text('game_mode').default('classic').notNull(), // 'classic' | 'freeze_tag' | 'infection' | 'treasure_hunt'
+  rescueRadius: integer('rescue_radius').default(10).notNull(),
   hidingDuration: integer('hiding_duration').default(120).notNull(),
   revealInterval: integer('reveal_interval').default(120).notNull(),
   matchDuration: integer('match_duration').default(900).notNull(),
@@ -52,6 +54,9 @@ export const matchParticipants = pgTable('match_participants', {
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   role: text('role').notNull(), // 'hider' | 'seeker'
   isCaught: boolean('is_caught').default(false).notNull(),
+  isFrozen: boolean('is_frozen').default(false).notNull(),
+  frozenAt: timestamp('frozen_at'),
+  rescuesCount: integer('rescues_count').default(0).notNull(),
   revealedLat: doublePrecision('revealed_lat'),
   revealedLng: doublePrecision('revealed_lng'),
   revealedAt: timestamp('revealed_at'),
@@ -97,12 +102,26 @@ export const messages = pgTable('messages', {
   timestamp: timestamp('timestamp').defaultNow().notNull(),
 });
 
+// 9. Collectibles Table (Geo-Bounty Skattejakt / Treasure Hunt)
+export const collectibles = pgTable('collectibles', {
+  id: text('id').primaryKey(),
+  matchId: text('match_id').notNull().references(() => matches.id, { onDelete: 'cascade' }),
+  type: text('type').notNull(), // 'energy_cube' | 'bounty_crystal'
+  lat: doublePrecision('lat').notNull(),
+  lng: doublePrecision('lng').notNull(),
+  points: integer('points').notNull(), // 50 for cube, 150 for crystal
+  isCollected: boolean('is_collected').default(false).notNull(),
+  collectedById: text('collected_by_id').references(() => users.id, { onDelete: 'set null' }),
+  collectedAt: timestamp('collected_at'),
+});
+
 // Drizzle Relations definitions
 export const usersRelations = relations(users, ({ one, many }) => ({
   profile: one(profiles, { fields: [users.id], references: [profiles.id] }),
   participants: many(matchParticipants),
   catchesMade: many(catches, { relationName: 'hunterCatches' }),
   catchesSuffered: many(catches, { relationName: 'targetCatches' }),
+  collectedItems: many(collectibles),
 }));
 
 export const profilesRelations = relations(profiles, ({ one }) => ({
@@ -115,6 +134,12 @@ export const matchesRelations = relations(matches, ({ one, many }) => ({
   bombs: many(bombs),
   catches: many(catches),
   messages: many(messages),
+  collectibles: many(collectibles),
+}));
+
+export const collectiblesRelations = relations(collectibles, ({ one }) => ({
+  match: one(matches, { fields: [collectibles.matchId], references: [matches.id] }),
+  collectedBy: one(users, { fields: [collectibles.collectedById], references: [users.id] }),
 }));
 
 export const matchParticipantsRelations = relations(matchParticipants, ({ one }) => ({

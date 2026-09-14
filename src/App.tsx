@@ -12,13 +12,20 @@ import Leaderboard from './pages/Leaderboard';
 import ProfilePage from './pages/Profile';
 import DevGpsSimulator from './components/DevGpsSimulator';
 import { CloudAuthModal } from './components/CloudAuthModal';
+import { Sun, Moon } from 'lucide-react';
+import { ThemeProvider, useTheme } from './lib/ThemeContext';
 
 const queryClient = new QueryClient();
 
 const Navigation: React.FC = () => {
   const { user, profile, isGuest, toggleDark, logout } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const [location] = useLocation();
   const [cloudModalOpen, setCloudModalOpen] = useState(false);
+
+  // Detect active match to prevent chat occlusion and accidental navigation
+  const hasActiveMatch = typeof window !== 'undefined' && !!sessionStorage.getItem('active_match_id');
+  const isMatchActive = location === '/matches' && hasActiveMatch;
 
   if (!user) return null;
 
@@ -50,7 +57,21 @@ const Navigation: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-3 font-rajdhani">
+        <div className="flex items-center gap-2 sm:gap-3 font-rajdhani">
+          {/* Outdoor Bright / Cyberpunk Dark Theme Toggle */}
+          <button
+            onClick={toggleTheme}
+            className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg flex items-center justify-center border transition-all active:scale-95 bg-zinc-900/80 border-cyber-yellow/40 hover:border-cyber-yellow hover:bg-cyber-yellow/10 text-cyber-yellow shadow-yellow-glow/20 shrink-0"
+            title={theme === 'bright' ? 'Switch to Cyberpunk Dark Mode' : 'Switch to Outdoor Bright Mode'}
+            aria-label={theme === 'bright' ? 'Switch to Dark Mode' : 'Switch to Bright Mode'}
+          >
+            {theme === 'bright' ? (
+              <Moon className="w-4 h-4 sm:w-5 sm:h-5 text-amber-500" />
+            ) : (
+              <Sun className="w-4 h-4 sm:w-5 sm:h-5 text-cyber-yellow animate-pulse" />
+            )}
+          </button>
+
           {/* Wild Zone Active / Offline Toggle */}
           <button
             onClick={() => toggleDark(!profile?.isDark)}
@@ -81,7 +102,7 @@ const Navigation: React.FC = () => {
               <div className="flex items-center gap-1">
                 <span className="text-xs font-bold leading-tight max-w-[85px] truncate">{user.name}</span>
                 {isGuest && (
-                  <span className="text-[8px] bg-cyber-yellow/15 text-cyber-yellow px-1 rounded uppercase font-black">Guest</span>
+                  <span className="text-[10px] bg-cyber-yellow/15 text-cyber-yellow px-1.5 py-0.5 rounded uppercase font-black">Guest</span>
                 )}
               </div>
               <span className="text-[10px] text-cyber-cyan leading-tight">{profile?.score ?? 0} XP</span>
@@ -99,8 +120,10 @@ const Navigation: React.FC = () => {
         </div>
       </header>
       
-      {/* Mobile nav bar floating bottom with home-indicator safe-area padding */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 border-t border-cyber-cyan/20 bg-cyber-bg/95 backdrop-blur-md flex items-center justify-around px-2 pl-[calc(0.5rem+env(safe-area-inset-left,0px))] pr-[calc(0.5rem+env(safe-area-inset-right,0px))] pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] min-h-[calc(3.5rem+env(safe-area-inset-bottom,0px))] font-semibold text-xs font-rajdhani tracking-wider">
+      {/* Mobile nav bar floating bottom with home-indicator safe-area padding (z-30 ensures in-match chat drawer z-40 has priority; hidden during active match) */}
+      <nav className={`md:hidden fixed bottom-0 left-0 right-0 z-30 border-t border-cyber-cyan/20 bg-cyber-bg/95 backdrop-blur-md items-center justify-around px-2 pl-[calc(0.5rem+env(safe-area-inset-left,0px))] pr-[calc(0.5rem+env(safe-area-inset-right,0px))] pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] min-h-[calc(3.5rem+env(safe-area-inset-bottom,0px))] font-semibold text-xs font-rajdhani tracking-wider ${
+        isMatchActive ? 'hidden' : 'flex'
+      }`}>
         <Link href="/" className={`${location === '/' ? 'text-cyber-cyan' : 'text-cyber-muted'}`}>Wild Zone</Link>
         <Link href="/matches" className={`${location === '/matches' ? 'text-cyber-cyan' : 'text-cyber-muted'}`}>Matches</Link>
         <Link href="/social" className={`${location === '/social' ? 'text-cyber-cyan' : 'text-cyber-muted'}`}>Social</Link>
@@ -158,14 +181,16 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <ToastProvider>
-        <AuthProvider>
-          <GpsProvider>
-            <div className="relative min-h-screen bg-cyber-bg overflow-x-hidden">
-              <div className="scanlines"></div>
-              <MainRoutes />
-            </div>
-          </GpsProvider>
-        </AuthProvider>
+        <ThemeProvider>
+          <AuthProvider>
+            <GpsProvider>
+              <div className="relative min-h-screen bg-cyber-bg overflow-x-hidden">
+                <div className="scanlines"></div>
+                <MainRoutes />
+              </div>
+            </GpsProvider>
+          </AuthProvider>
+        </ThemeProvider>
       </ToastProvider>
     </QueryClientProvider>
   );

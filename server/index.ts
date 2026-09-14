@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { db, pool } from './db.js';
-import { users, profiles, matches, matchParticipants, bombs, catches, friends, messages, wildZoneEvents } from './schema.js';
+import { users, profiles, matches, matchParticipants, bombs, catches, friends, messages, wildZoneEvents, collectibles } from './schema.js';
 import { eq, and, or, sql } from 'drizzle-orm';
 
 const app = express();
@@ -38,6 +38,137 @@ let mockCatches: any[] = [];
 let mockFriends: any[] = [];
 let mockMessages: any[] = [];
 let mockWildZoneEvents: any[] = [];
+let mockCollectibles: any[] = [];
+
+// Ephemeral anti-griefing immunity cache for Freeze Tag: Map<"matchId_userId", timestampMs>
+const frozenImmunityMap = new Map<string, number>();
+
+// Match tick debounce tracker: Map<matchId, timestampMs>
+const matchTickDebounce = new Map<string, number>();
+
+// --- MILESTONE 3: TACTICAL POWER-UPS DATA STRUCTURES ---
+export interface ActivePowerUp {
+  id: string;
+  matchId: string;
+  userId: string;
+  userName?: string;
+  userRole?: 'hider' | 'seeker';
+  type: 'sprint' | 'decoy' | 'shield' | 'freeze_trap';
+  lat: number;
+  lng: number;
+  radius?: number; // 10m for freeze_trap
+  activatedAt: Date | string;
+  expiresAt: Date | string;
+  isActive: boolean;
+  isTriggered?: boolean;
+  triggeredBy?: string | null;
+  triggeredAt?: Date | string | null;
+}
+
+// In-memory store for active power-ups per match
+const mockPowerUps = new Map<string, ActivePowerUp[]>();
+
+// Power-up cooldowns per player: Map<"matchId_userId", Record<powerUpType, cooldownUntilMs>>
+const playerPowerUpCooldowns = new Map<string, Record<string, number>>();
+
+// Ephemeral lookup maps for fast tick evaluation
+const playerShieldMap = new Map<string, number>(); // matchId_userId -> activeUntilMs
+const playerSprintMap = new Map<string, number>(); // matchId_userId -> activeUntilMs
+const playerSnaredMap = new Map<string, number>(); // matchId_userId -> snaredUntilMs
+
+// Power-Up Game Balance Constants
+const POWERUP_CONFIG = {
+  sprint:      { cooldownMs: 45000, durationMs: 15000, bonusRadius: 6 },
+  decoy:       { cooldownMs: 60000, durationMs: 30000 },
+  shield:      { cooldownMs: 90000, durationMs: 20000, dodgeXp: 50, graceImmunityMs: 3000 },
+  freeze_trap: { cooldownMs: 60000, durationMs: 60000, trapRadius: 10, snareDurationMs: 10000, snareXp: 50 }
+} as const;
+
+
+// --- SEEDED DETERMINISTIC RADIAL COLLECTIBLE GENERATOR (Mulberry32 PRNG + Geodetic Cosine Correction) ---
+function hashSeed(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash) + str.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function mulberry32(seed: number) {
+  return function() {
+    let t = (seed += 0x6D2B79F5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function generateMatchCollectibles(
+  matchId: string,
+  centerLat: number,
+  centerLng: number,
+  boundaryRadius: number
+): Array<{
+  id: string;
+  matchId: string;
+  type: 'energy_cube' | 'bounty_crystal';
+  lat: number;
+  lng: number;
+  points: number;
+  isCollected: boolean;
+  collectedById: string | null;
+  collectedAt: Date | null;
+}> {
+  const rng = mulberry32(hashSeed(matchId) || 54321);
+  const items: any[] = [];
+  const latScaling = 111320;
+  const lngScaling = 111320 * Math.cos((centerLat * Math.PI) / 180);
+
+  // 1. Spawn 10 Energy Cubes (50 XP each)
+  for (let i = 0; i < 10; i++) {
+    const theta = (i / 10) * 2 * Math.PI + (rng() * 0.4 - 0.2);
+    // Bounded between 18% and 83% of boundary radius
+    const dist = boundaryRadius * (0.18 + 0.65 * rng());
+    const lat = centerLat + (dist * Math.cos(theta)) / latScaling;
+    const lng = centerLng + (dist * Math.sin(theta)) / lngScaling;
+
+    items.push({
+      id: `${matchId}_cube_${i + 1}`,
+      matchId,
+      type: 'energy_cube',
+      lat: Number(lat.toFixed(6)),
+      lng: Number(lng.toFixed(6)),
+      points: 50,
+      isCollected: false,
+      collectedById: null,
+      collectedAt: null
+    });
+  }
+
+  // 2. Spawn 4 Bounty Crystals (150 XP each) in 4 quadrants
+  for (let j = 0; j < 4; j++) {
+    const theta = (j / 4) * 2 * Math.PI + (Math.PI / 4) + (rng() * 0.3 - 0.15);
+    // Bounded between 50% and 88% of boundary radius
+    const dist = boundaryRadius * (0.50 + 0.38 * rng());
+    const lat = centerLat + (dist * Math.cos(theta)) / latScaling;
+    const lng = centerLng + (dist * Math.sin(theta)) / lngScaling;
+
+    items.push({
+      id: `${matchId}_crystal_${j + 1}`,
+      matchId,
+      type: 'bounty_crystal',
+      lat: Number(lat.toFixed(6)),
+      lng: Number(lng.toFixed(6)),
+      points: 150,
+      isCollected: false,
+      collectedById: null,
+      collectedAt: null
+    });
+  }
+
+  return items;
+}
 
 // Helper: Haversine distance formula in meters
 function getDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -203,6 +334,8 @@ app.use(async (req: any, res, next) => {
           name: userName || userId,
           avatar: userAvatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${userId}`
         });
+      }
+      if (!mockProfiles.has(userId)) {
         mockProfiles.set(userId, {
           id: userId,
           lat: clientUserData?.lat || 59.9139,
@@ -651,6 +784,24 @@ app.get('/api/profile/stats', async (req: any, res) => {
   }
 });
 
+// POST: Award bonus XP to player (e.g. from Daily Quests or special achievements)
+app.post('/api/profile/xp', async (req: any, res) => {
+  if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+  const { xpToAdd } = req.body;
+  const xp = Math.min(1000, Math.max(0, Number(xpToAdd) || 0));
+
+  if (isDbConnected) {
+    await db.update(profiles).set({ score: sql`${profiles.score} + ${xp}` }).where(eq(profiles.id, req.user.id));
+  } else {
+    const prof = mockProfiles.get(req.user.id);
+    if (prof) {
+      prof.score = (prof.score || 0) + xp;
+    }
+  }
+
+  res.json({ success: true, addedXp: xp });
+});
+
 
 // --- MATCHES API ---
 
@@ -938,6 +1089,10 @@ app.post('/api/dev/trigger-wild-zone', async (req: any, res) => {
 app.post('/api/matches', async (req: any, res) => {
   if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
 
+  const { gameMode = 'classic', rescueRadius = 10 } = req.body || {};
+  const validModes = ['classic', 'freeze_tag', 'infection', 'treasure_hunt'];
+  const mode = validModes.includes(gameMode) ? gameMode : 'classic';
+
   // Generate 6-char random code
   const code = Math.random().toString(36).substring(2, 8).toUpperCase();
   const defaultBoundaryLat = 59.9139; // Fallback center
@@ -956,6 +1111,8 @@ app.post('/api/matches', async (req: any, res) => {
     const newMatch = await db.insert(matches).values({
       id: code,
       hostId: req.user.id,
+      gameMode: mode,
+      rescueRadius: Number(rescueRadius) || 10,
       status: 'waiting',
       boundaryCenterLat: hostLat,
       boundaryCenterLng: hostLng,
@@ -970,7 +1127,11 @@ app.post('/api/matches', async (req: any, res) => {
     await db.insert(matchParticipants).values({
       matchId: code,
       userId: req.user.id,
-      role: 'seeker'
+      role: 'seeker',
+      isCaught: false,
+      isFrozen: false,
+      frozenAt: null,
+      rescuesCount: 0
     });
 
     res.json(newMatch[0]);
@@ -984,6 +1145,8 @@ app.post('/api/matches', async (req: any, res) => {
     const matchObj = {
       id: code,
       hostId: req.user.id,
+      gameMode: mode,
+      rescueRadius: Number(rescueRadius) || 10,
       status: 'waiting',
       hidingDuration: 120,
       revealInterval: 120,
@@ -1010,6 +1173,9 @@ app.post('/api/matches', async (req: any, res) => {
       userId: req.user.id,
       role: 'seeker',
       isCaught: false,
+      isFrozen: false,
+      frozenAt: null,
+      rescuesCount: 0,
       revealedLat: null,
       revealedLng: null,
       revealedAt: null,
@@ -1038,6 +1204,463 @@ app.get('/api/matches', async (req: any, res) => {
   }
 });
 
+// --- ON-DEMAND MATCH TICK ENGINE (Evaluates ticks on client polls and actions for serverless resilience) ---
+async function evaluateMatchTick(matchId: string, now: Date = new Date()): Promise<void> {
+  const lastTick = matchTickDebounce.get(matchId) || 0;
+  if (now.getTime() - lastTick < 400) return;
+  matchTickDebounce.set(matchId, now.getTime());
+
+  if (isDbConnected) {
+    try {
+      const matchRow = await db.query.matches.findFirst({ where: eq(matches.id, matchId) });
+      if (!matchRow) return;
+      if (matchRow.status !== 'hiding' && matchRow.status !== 'hunting') return;
+
+      let currentStatus = matchRow.status;
+
+      const hidingEndsTime = matchRow.hidingEndsAt ? new Date(matchRow.hidingEndsAt).getTime() : 0;
+      const huntingEndsTime = matchRow.huntingEndsAt ? new Date(matchRow.huntingEndsAt).getTime() : 0;
+      const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+
+      // Transition: Hiding -> Hunting
+      if (currentStatus === 'hiding' && hidingEndsTime > 0 && nowMs >= hidingEndsTime) {
+        await db.update(matches).set({ status: 'hunting' }).where(eq(matches.id, matchId));
+        currentStatus = 'hunting';
+      }
+
+      // Transition: Hunting -> Finished (Timeout)
+      if (currentStatus === 'hunting' && huntingEndsTime > 0 && nowMs >= huntingEndsTime) {
+        await db.update(matches).set({ status: 'finished' }).where(eq(matches.id, matchId));
+        matchTickDebounce.delete(matchId);
+        return;
+      }
+
+      if (currentStatus === 'hunting') {
+        const elapsed = nowMs - hidingEndsTime;
+        const revealIntervalMs = (matchRow.revealInterval || 120) * 1000;
+        const currentCycle = Math.floor(elapsed / revealIntervalMs);
+
+        const parts = await db.select().from(matchParticipants).where(eq(matchParticipants.matchId, matchId));
+        const hiders = parts.filter(p => p.role === 'hider');
+        const seekers = parts.filter(p => p.role === 'seeker');
+
+        // Snapshot reveals for hiders
+        for (const hider of hiders) {
+          const lastRevealed = hider.revealedAt ? new Date(hider.revealedAt).getTime() : 0;
+          const cycleOfLastReveal = Math.floor((lastRevealed - hidingEndsTime) / revealIntervalMs);
+          if (hider.revealedLat == null || currentCycle > cycleOfLastReveal) {
+            const hiderProfile = await db.query.profiles.findFirst({ where: eq(profiles.id, hider.userId) });
+            if (hiderProfile) {
+              await db.update(matchParticipants).set({
+                revealedLat: hiderProfile.lat,
+                revealedLng: hiderProfile.lng,
+                revealedAt: now
+              }).where(eq(matchParticipants.id, hider.id));
+            }
+          }
+        }
+
+        // A. FREEZE TRAP HAZARD PROXIMITY CHECK (DB)
+        const matchPowerUps = mockPowerUps.get(matchId) || [];
+        const activeTraps = matchPowerUps.filter(
+          p => p.type === 'freeze_trap' && p.isActive && !p.isTriggered && new Date(p.expiresAt).getTime() > now.getTime()
+        );
+
+        for (const trap of activeTraps) {
+          const opponents = participantsList.filter((p: any) => p.role !== trap.userRole && !p.isCaught && p.userId !== trap.userId);
+          for (const opp of opponents) {
+            const oppProfile = await db.query.profiles.findFirst({ where: eq(profiles.id, opp.userId) });
+            if (!oppProfile || oppProfile.lat == null || oppProfile.lng == null) continue;
+
+            const dist = getDistance(trap.lat, trap.lng, oppProfile.lat, oppProfile.lng);
+            if (dist <= (trap.radius || 10)) {
+              trap.isTriggered = true;
+              trap.isActive = false;
+              trap.triggeredBy = opp.userId;
+              trap.triggeredAt = now;
+
+              const snareExpiry = now.getTime() + POWERUP_CONFIG.freeze_trap.snareDurationMs;
+              playerSnaredMap.set(`${matchId}_${opp.userId}`, snareExpiry);
+              opp.isSnared = true;
+              opp.snaredUntil = new Date(snareExpiry);
+
+              await db.update(profiles).set({ score: sql`${profiles.score} + ${POWERUP_CONFIG.freeze_trap.snareXp}` }).where(eq(profiles.id, trap.userId));
+              break;
+            }
+          }
+        }
+
+        // AUTO-CAPTURE PROXIMITY CHECK
+        const captureRadius = matchRow.captureRadius ?? matchRow.catchRadius ?? 4;
+        for (const seeker of seekers) {
+          // Snared seekers cannot capture
+          const seekerSnaredUntil = playerSnaredMap.get(`${matchId}_${seeker.userId}`) || 0;
+          if (seekerSnaredUntil > now.getTime()) continue;
+
+          const seekerSprintUntil = playerSprintMap.get(`${matchId}_${seeker.userId}`) || 0;
+
+          const seekerProfile = await db.query.profiles.findFirst({ where: eq(profiles.id, seeker.userId) });
+          if (!seekerProfile || seekerProfile.lat == null || seekerProfile.lng == null) continue;
+
+          for (const hider of hiders) {
+            if (hider.isCaught) continue;
+
+            // Freeze tag immunity check
+            if (matchRow.gameMode === 'freeze_tag') {
+              if (hider.isFrozen) continue;
+              const immunityUntil = frozenImmunityMap.get(`${matchId}_${hider.userId}`);
+              if (immunityUntil && now.getTime() < immunityUntil) continue;
+            }
+
+            const hiderProfile = await db.query.profiles.findFirst({ where: eq(profiles.id, hider.userId) });
+            if (!hiderProfile || hiderProfile.lat == null || hiderProfile.lng == null) continue;
+
+            // Sprint buffer adjustments
+            const hiderSprintUntil = playerSprintMap.get(`${matchId}_${hider.userId}`) || 0;
+            let effectiveRadius = captureRadius;
+            if (seekerSprintUntil > now.getTime()) effectiveRadius += POWERUP_CONFIG.sprint.bonusRadius;
+            if (hiderSprintUntil > now.getTime()) effectiveRadius = Math.max(2, effectiveRadius - POWERUP_CONFIG.sprint.bonusRadius);
+
+            const dist = getDistance(seekerProfile.lat, seekerProfile.lng, hiderProfile.lat, hiderProfile.lng);
+            if (dist <= effectiveRadius) {
+              // SHIELD ABSORPTION CHECK
+              const hiderShieldUntil = hider.activeShieldUntil
+                ? new Date(hider.activeShieldUntil).getTime()
+                : (playerShieldMap.get(`${matchId}_${hider.userId}`) || 0);
+
+              if (hiderShieldUntil > now.getTime()) {
+                hider.activeShieldUntil = null;
+                playerShieldMap.delete(`${matchId}_${hider.userId}`);
+                const activeShield = matchPowerUps.find(p => p.type === 'shield' && p.userId === hider.userId && p.isActive);
+                if (activeShield) activeShield.isActive = false;
+
+                await db.update(profiles).set({ score: sql`${profiles.score} + ${POWERUP_CONFIG.shield.dodgeXp}` }).where(eq(profiles.id, hider.userId));
+                frozenImmunityMap.set(`${matchId}_${hider.userId}`, now.getTime() + POWERUP_CONFIG.shield.graceImmunityMs);
+                continue;
+              }
+
+              if (matchRow.gameMode === 'freeze_tag') {
+                await db.update(matchParticipants).set({ isFrozen: true, frozenAt: now }).where(eq(matchParticipants.id, hider.id));
+                await db.insert(catches).values({ matchId, hunterId: seeker.userId, targetId: hider.userId, timestamp: now });
+                await db.update(profiles).set({ score: sql`${profiles.score} + 100` }).where(eq(profiles.id, seeker.userId));
+                hider.isFrozen = true;
+              } else if (matchRow.gameMode === 'infection') {
+                await db.update(matchParticipants).set({ role: 'seeker', isCaught: false }).where(eq(matchParticipants.id, hider.id));
+                await db.insert(catches).values({ matchId, hunterId: seeker.userId, targetId: hider.userId, timestamp: now });
+                await db.update(profiles).set({ score: sql`${profiles.score} + 100` }).where(eq(profiles.id, seeker.userId));
+                hider.role = 'seeker';
+              } else {
+                await db.update(matchParticipants).set({ isCaught: true }).where(eq(matchParticipants.id, hider.id));
+                await db.insert(catches).values({ matchId, hunterId: seeker.userId, targetId: hider.userId, timestamp: now });
+                await db.update(profiles).set({ score: sql`${profiles.score} + 100` }).where(eq(profiles.id, seeker.userId));
+                hider.isCaught = true;
+              }
+            }
+          }
+        }
+
+        // Bombs processing
+        const matchBombs = await db.select().from(bombs).where(eq(bombs.matchId, matchId));
+        for (const bombRow of matchBombs) {
+          let bombIsActive = bombRow.isActive;
+          if (!bombIsActive && now >= bombRow.activatesAt) {
+            await db.update(bombs).set({ isActive: true }).where(eq(bombs.id, bombRow.id));
+            bombIsActive = true;
+          }
+
+          if (bombIsActive) {
+            for (const hider of hiders) {
+              if (hider.isCaught) continue;
+              if (matchRow.gameMode === 'freeze_tag' && hider.isFrozen) continue;
+
+              const hiderProfile = await db.query.profiles.findFirst({ where: eq(profiles.id, hider.userId) });
+              if (hiderProfile && hiderProfile.lat && hiderProfile.lng) {
+                const dist = getDistance(bombRow.lat, bombRow.lng, hiderProfile.lat, hiderProfile.lng);
+                if (dist <= bombRow.radius) {
+                  if (matchRow.gameMode === 'freeze_tag') {
+                    await db.update(matchParticipants).set({ isFrozen: true, frozenAt: now }).where(eq(matchParticipants.id, hider.id));
+                    await db.insert(catches).values({ matchId, hunterId: bombRow.placedById, targetId: hider.userId, timestamp: now });
+                    await db.update(profiles).set({ score: sql`${profiles.score} + 100` }).where(eq(profiles.id, bombRow.placedById));
+                    hider.isFrozen = true;
+                  } else if (matchRow.gameMode === 'infection') {
+                    await db.update(matchParticipants).set({ role: 'seeker', isCaught: false }).where(eq(matchParticipants.id, hider.id));
+                    await db.insert(catches).values({ matchId, hunterId: bombRow.placedById, targetId: hider.userId, timestamp: now });
+                    await db.update(profiles).set({ score: sql`${profiles.score} + 100` }).where(eq(profiles.id, bombRow.placedById));
+                    hider.role = 'seeker';
+                  } else {
+                    await db.update(matchParticipants).set({ isCaught: true }).where(eq(matchParticipants.id, hider.id));
+                    await db.insert(catches).values({ matchId, hunterId: bombRow.placedById, targetId: hider.userId, timestamp: now });
+                    await db.update(profiles).set({ score: sql`${profiles.score} + 100` }).where(eq(profiles.id, bombRow.placedById));
+                    hider.isCaught = true;
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // Win condition evaluation
+        const updatedParts = await db.select().from(matchParticipants).where(eq(matchParticipants.matchId, matchId));
+        if (matchRow.gameMode === 'freeze_tag') {
+          const activeHiders = updatedParts.filter(p => p.role === 'hider');
+          if (activeHiders.length > 0 && activeHiders.every(h => h.isFrozen || h.isCaught)) {
+            await db.update(matches).set({ status: 'finished' }).where(eq(matches.id, matchId));
+          }
+        } else if (matchRow.gameMode === 'infection') {
+          const survivors = updatedParts.filter(p => p.role === 'hider' && !p.isCaught);
+          if (survivors.length === 0) {
+            await db.update(matches).set({ status: 'finished' }).where(eq(matches.id, matchId));
+          }
+        } else if (matchRow.gameMode === 'treasure_hunt') {
+          const uncollectedCrystals = await db.select({ count: sql`count(*)` })
+            .from(collectibles)
+            .where(and(
+              eq(collectibles.matchId, matchId),
+              eq(collectibles.type, 'bounty_crystal'),
+              eq(collectibles.isCollected, false)
+            ));
+          if (Number(uncollectedCrystals[0]?.count ?? 1) === 0) {
+            await db.update(matches).set({ status: 'finished' }).where(eq(matches.id, matchId));
+          }
+        } else {
+          const activeHiders = updatedParts.filter(p => p.role === 'hider');
+          if (activeHiders.length > 0 && activeHiders.every(h => h.isCaught)) {
+            await db.update(matches).set({ status: 'finished' }).where(eq(matches.id, matchId));
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`evaluateMatchTick DB error for match ${matchId}:`, err);
+    }
+  } else {
+    const matchRow = mockMatches.get(matchId);
+    if (!matchRow) return;
+    if (matchRow.status !== 'hiding' && matchRow.status !== 'hunting') return;
+
+    let currentStatus = matchRow.status;
+
+    const hidingEndsTime = matchRow.hidingEndsAt ? new Date(matchRow.hidingEndsAt).getTime() : 0;
+    const huntingEndsTime = matchRow.huntingEndsAt ? new Date(matchRow.huntingEndsAt).getTime() : 0;
+    const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+
+    // Transition: Hiding -> Hunting
+    if (currentStatus === 'hiding' && hidingEndsTime > 0 && nowMs >= hidingEndsTime) {
+      matchRow.status = 'hunting';
+      currentStatus = 'hunting';
+    }
+
+    // Transition: Hunting -> Finished (Timeout)
+    if (currentStatus === 'hunting' && huntingEndsTime > 0 && nowMs >= huntingEndsTime) {
+      matchRow.status = 'finished';
+      matchTickDebounce.delete(matchId);
+      return;
+    }
+
+    if (currentStatus === 'hunting') {
+      const elapsed = nowMs - hidingEndsTime;
+      const revealIntervalMs = (matchRow.revealInterval || 120) * 1000;
+      const currentCycle = Math.floor(elapsed / revealIntervalMs);
+
+      const hiders = mockParticipants.filter(p => p.matchId === matchId && p.role === 'hider');
+      const seekers = mockParticipants.filter(p => p.matchId === matchId && p.role === 'seeker');
+
+      // Snapshot reveals
+      hiders.forEach(hider => {
+        const lastRevealed = hider.revealedAt ? new Date(hider.revealedAt).getTime() : 0;
+        const cycleOfLastReveal = Math.floor((lastRevealed - hidingEndsTime) / revealIntervalMs);
+        if (hider.revealedLat == null || currentCycle > cycleOfLastReveal) {
+          const hiderProfile = mockProfiles.get(hider.userId);
+          if (hiderProfile) {
+            hider.revealedLat = hiderProfile.lat;
+            hider.revealedLng = hiderProfile.lng;
+            hider.revealedAt = now;
+          }
+        }
+      });
+
+      // A. FREEZE TRAP HAZARD PROXIMITY CHECK (MOCK)
+      const matchPowerUps = mockPowerUps.get(matchId) || [];
+      const activeTraps = matchPowerUps.filter(
+        p => p.type === 'freeze_trap' && p.isActive && !p.isTriggered && new Date(p.expiresAt).getTime() > now.getTime()
+      );
+
+      for (const trap of activeTraps) {
+        const opponents = mockParticipants.filter(p => p.matchId === matchId && p.role !== trap.userRole && !p.isCaught && p.userId !== trap.userId);
+        for (const opp of opponents) {
+          const oppProfile = mockProfiles.get(opp.userId);
+          if (!oppProfile || oppProfile.lat == null || oppProfile.lng == null) continue;
+
+          const dist = getDistance(trap.lat, trap.lng, oppProfile.lat, oppProfile.lng);
+          if (dist <= (trap.radius || 10)) {
+            trap.isTriggered = true;
+            trap.isActive = false;
+            trap.triggeredBy = opp.userId;
+            trap.triggeredAt = now;
+
+            const snareExpiry = now.getTime() + POWERUP_CONFIG.freeze_trap.snareDurationMs;
+            playerSnaredMap.set(`${matchId}_${opp.userId}`, snareExpiry);
+            opp.isSnared = true;
+            opp.snaredUntil = new Date(snareExpiry);
+
+            const deployerProf = mockProfiles.get(trap.userId);
+            if (deployerProf) deployerProf.score = (deployerProf.score || 0) + POWERUP_CONFIG.freeze_trap.snareXp;
+            break;
+          }
+        }
+      }
+
+      // AUTO-CAPTURE PROXIMITY CHECK
+      const captureRadius = matchRow.captureRadius ?? matchRow.catchRadius ?? 4;
+      seekers.forEach(seeker => {
+        // Snared seekers cannot capture
+        const seekerSnaredUntil = playerSnaredMap.get(`${matchId}_${seeker.userId}`) || 0;
+        if (seekerSnaredUntil > now.getTime()) return;
+
+        const seekerSprintUntil = playerSprintMap.get(`${matchId}_${seeker.userId}`) || 0;
+        const seekerProfile = mockProfiles.get(seeker.userId);
+        if (!seekerProfile || seekerProfile.lat == null || seekerProfile.lng == null) return;
+
+        hiders.forEach(hider => {
+          if (hider.isCaught) return;
+
+          // Freeze tag immunity check
+          if (matchRow.gameMode === 'freeze_tag') {
+            if (hider.isFrozen) return;
+            const immunityUntil = frozenImmunityMap.get(`${matchId}_${hider.userId}`) || hider.frozenImmunityUntil;
+            if (immunityUntil && now.getTime() < immunityUntil) return;
+          }
+
+          const hiderProfile = mockProfiles.get(hider.userId);
+          if (!hiderProfile || hiderProfile.lat == null || hiderProfile.lng == null) return;
+
+          // Sprint buffer adjustments
+          const hiderSprintUntil = playerSprintMap.get(`${matchId}_${hider.userId}`) || 0;
+          let effectiveRadius = captureRadius;
+          if (seekerSprintUntil > now.getTime()) effectiveRadius += POWERUP_CONFIG.sprint.bonusRadius;
+          if (hiderSprintUntil > now.getTime()) effectiveRadius = Math.max(2, effectiveRadius - POWERUP_CONFIG.sprint.bonusRadius);
+
+          const dist = getDistance(seekerProfile.lat, seekerProfile.lng, hiderProfile.lat, hiderProfile.lng);
+          if (dist <= effectiveRadius) {
+            // SHIELD ABSORPTION CHECK
+            const hiderShieldUntil = hider.activeShieldUntil
+              ? new Date(hider.activeShieldUntil).getTime()
+              : (playerShieldMap.get(`${matchId}_${hider.userId}`) || 0);
+
+            if (hiderShieldUntil > now.getTime()) {
+              hider.activeShieldUntil = null;
+              playerShieldMap.delete(`${matchId}_${hider.userId}`);
+              const activeShield = matchPowerUps.find(p => p.type === 'shield' && p.userId === hider.userId && p.isActive);
+              if (activeShield) activeShield.isActive = false;
+
+              const targetProf = mockProfiles.get(hider.userId);
+              if (targetProf) targetProf.score = (targetProf.score || 0) + POWERUP_CONFIG.shield.dodgeXp;
+
+              frozenImmunityMap.set(`${matchId}_${hider.userId}`, now.getTime() + POWERUP_CONFIG.shield.graceImmunityMs);
+              return;
+            }
+
+            if (matchRow.gameMode === 'freeze_tag') {
+              hider.isFrozen = true;
+              hider.frozenAt = now;
+              seekerProfile.score = (seekerProfile.score || 0) + 100;
+              mockCatches.push({ id: mockCatches.length + 1, matchId, hunterId: seeker.userId, targetId: hider.userId, timestamp: now });
+            } else if (matchRow.gameMode === 'infection') {
+              hider.role = 'seeker';
+              hider.isCaught = false;
+              seekerProfile.score = (seekerProfile.score || 0) + 100;
+              mockCatches.push({ id: mockCatches.length + 1, matchId, hunterId: seeker.userId, targetId: hider.userId, timestamp: now });
+            } else {
+              hider.isCaught = true;
+              seekerProfile.score = (seekerProfile.score || 0) + 100;
+              mockCatches.push({ id: mockCatches.length + 1, matchId, hunterId: seeker.userId, targetId: hider.userId, timestamp: now });
+            }
+          }
+        });
+      });
+
+      // Bombs in mock
+      mockBombs.filter(b => b.matchId === matchId).forEach(bombRow => {
+        if (!bombRow.isActive && now >= bombRow.activatesAt) {
+          bombRow.isActive = true;
+        }
+
+        if (bombRow.isActive) {
+          hiders.forEach(hider => {
+            if (hider.isCaught) return;
+            if (matchRow.gameMode === 'freeze_tag' && hider.isFrozen) return;
+
+            const hiderProfile = mockProfiles.get(hider.userId);
+            if (hiderProfile) {
+              const dist = getDistance(bombRow.lat, bombRow.lng, hiderProfile.lat, hiderProfile.lng);
+              if (dist <= bombRow.radius) {
+                // Shield check on bomb hit
+                const hiderShieldUntil = hider.activeShieldUntil
+                  ? new Date(hider.activeShieldUntil).getTime()
+                  : (playerShieldMap.get(`${matchId}_${hider.userId}`) || 0);
+
+                if (hiderShieldUntil > now.getTime()) {
+                  hider.activeShieldUntil = null;
+                  playerShieldMap.delete(`${matchId}_${hider.userId}`);
+                  const activeShield = matchPowerUps.find(p => p.type === 'shield' && p.userId === hider.userId && p.isActive);
+                  if (activeShield) activeShield.isActive = false;
+
+                  const targetProf = mockProfiles.get(hider.userId);
+                  if (targetProf) targetProf.score = (targetProf.score || 0) + POWERUP_CONFIG.shield.dodgeXp;
+
+                  frozenImmunityMap.set(`${matchId}_${hider.userId}`, now.getTime() + POWERUP_CONFIG.shield.graceImmunityMs);
+                  return;
+                }
+
+                if (matchRow.gameMode === 'freeze_tag') {
+                  hider.isFrozen = true;
+                  hider.frozenAt = now;
+                  const sp = mockProfiles.get(bombRow.placedById);
+                  if (sp) sp.score = (sp.score || 0) + 100;
+                  mockCatches.push({ id: mockCatches.length + 1, matchId, hunterId: bombRow.placedById, targetId: hider.userId, timestamp: now });
+                } else if (matchRow.gameMode === 'infection') {
+                  hider.role = 'seeker';
+                  hider.isCaught = false;
+                  const sp = mockProfiles.get(bombRow.placedById);
+                  if (sp) sp.score = (sp.score || 0) + 100;
+                  mockCatches.push({ id: mockCatches.length + 1, matchId, hunterId: bombRow.placedById, targetId: hider.userId, timestamp: now });
+                } else {
+                  hider.isCaught = true;
+                  const sp = mockProfiles.get(bombRow.placedById);
+                  if (sp) sp.score = (sp.score || 0) + 100;
+                  mockCatches.push({ id: mockCatches.length + 1, matchId, hunterId: bombRow.placedById, targetId: hider.userId, timestamp: now });
+                }
+              }
+            }
+          });
+        }
+      });
+
+      // Win check
+      if (matchRow.gameMode === 'freeze_tag') {
+        const currentHiders = mockParticipants.filter(p => p.matchId === matchId && p.role === 'hider');
+        if (currentHiders.length > 0 && currentHiders.every(h => h.isFrozen || h.isCaught)) {
+          matchRow.status = 'finished';
+        }
+      } else if (matchRow.gameMode === 'infection') {
+        const survivors = mockParticipants.filter(p => p.matchId === matchId && p.role === 'hider' && !p.isCaught);
+        if (survivors.length === 0) {
+          matchRow.status = 'finished';
+        }
+      } else if (matchRow.gameMode === 'treasure_hunt') {
+        const remainingCrystals = mockCollectibles.filter(c => c.matchId === matchId && c.type === 'bounty_crystal' && !c.isCollected);
+        if (remainingCrystals.length === 0) {
+          matchRow.status = 'finished';
+        }
+      } else {
+        const currentHiders = mockParticipants.filter(p => p.matchId === matchId && p.role === 'hider');
+        if (currentHiders.length > 0 && currentHiders.every(h => h.isCaught)) {
+          matchRow.status = 'finished';
+        }
+      }
+    }
+  }
+}
+
 // GET: Match status
 app.get('/api/matches/:id', async (req: any, res) => {
   const matchId = req.params.id.toUpperCase();
@@ -1052,6 +1675,29 @@ app.get('/api/matches/:id', async (req: any, res) => {
     } catch (e) {}
   }
 
+  // Rehydrate power-ups from client sync header if provided
+  if (clientMatchSync && Array.isArray(clientMatchSync.powerUps)) {
+    const existingPowerUps = mockPowerUps.get(matchId) || [];
+    const nowMs = Date.now();
+    clientMatchSync.powerUps.forEach((pu: any) => {
+      const expiresMs = pu.expiresAt ? new Date(pu.expiresAt).getTime() : nowMs + 60000;
+      if (expiresMs > nowMs && !existingPowerUps.some(p => p.id === pu.id)) {
+        existingPowerUps.push({
+          ...pu,
+          matchId,
+          isActive: pu.isActive ?? true
+        });
+        if (pu.type === 'shield' && (pu.isActive ?? true) && expiresMs > nowMs) {
+          playerShieldMap.set(`${matchId}_${pu.userId}`, expiresMs);
+        }
+      }
+    });
+    mockPowerUps.set(matchId, existingPowerUps);
+  }
+
+  // Evaluate on-demand serverless tick before serving response
+  await evaluateMatchTick(matchId, new Date());
+
   if (isDbConnected) {
     const matchRow = await db.query.matches.findFirst({ where: eq(matches.id, matchId) });
     if (!matchRow) return res.status(404).json({ error: 'Match not found' });
@@ -1063,6 +1709,9 @@ app.get('/api/matches/:id', async (req: any, res) => {
       avatar: users.avatar,
       role: matchParticipants.role,
       isCaught: matchParticipants.isCaught,
+      isFrozen: matchParticipants.isFrozen,
+      frozenAt: matchParticipants.frozenAt,
+      rescuesCount: matchParticipants.rescuesCount,
       revealedLat: matchParticipants.revealedLat,
       revealedLng: matchParticipants.revealedLng,
       revealedAt: matchParticipants.revealedAt,
@@ -1082,6 +1731,8 @@ app.get('/api/matches/:id', async (req: any, res) => {
       return { ...b, hidden };
     });
 
+    const matchCollectibles = await db.select().from(collectibles).where(eq(collectibles.matchId, matchId));
+
     // Compute current shrinking zone radius
     const hidingEndsTime = matchRow.hidingEndsAt ? new Date(matchRow.hidingEndsAt).getTime() : null;
     let currentZoneRadius = matchRow.boundaryRadius ?? 500;
@@ -1091,7 +1742,11 @@ app.get('/api/matches/:id', async (req: any, res) => {
       currentZoneRadius = Math.max(50, currentZoneRadius - intervals * (matchRow.zoneShrinkAmount ?? 100));
     }
 
-    res.json({ match: { ...matchRow, currentZoneRadius }, participants: participantsList, bombs: activeBombs });
+    const activePowerUps = (mockPowerUps.get(matchId) || []).filter(
+      p => p.isActive && new Date(p.expiresAt).getTime() > Date.now()
+    );
+
+    res.json({ match: { ...matchRow, currentZoneRadius }, participants: participantsList, bombs: activeBombs, collectibles: matchCollectibles, powerUps: activePowerUps });
   } else {
     let matchRow = mockMatches.get(matchId);
 
@@ -1102,6 +1757,8 @@ app.get('/api/matches/:id', async (req: any, res) => {
         mockMatches.set(matchId, {
           id: matchId,
           hostId: restored.hostId || requesterId || 'host',
+          gameMode: restored.gameMode || 'classic',
+          rescueRadius: restored.rescueRadius ?? 10,
           status: restored.status || 'waiting',
           hidingDuration: restored.hidingDuration ?? 120,
           revealInterval: restored.revealInterval ?? 120,
@@ -1131,10 +1788,44 @@ app.get('/api/matches/:id', async (req: any, res) => {
             userId: hostId,
             role: 'seeker',
             isCaught: false,
+            isFrozen: false,
+            frozenAt: null,
+            rescuesCount: 0,
             revealedLat: null,
             revealedLng: null,
             revealedAt: null,
             joinedAt: new Date()
+          });
+        }
+
+        // Rehydrate participants list if provided
+        if (Array.isArray(clientMatchSync.participants)) {
+          clientMatchSync.participants.forEach((cp: any) => {
+            if (!mockParticipants.some(p => p.matchId === matchId && p.userId === cp.userId)) {
+              mockParticipants.push({
+                id: mockParticipants.length + 1,
+                matchId: matchId,
+                userId: cp.userId,
+                role: cp.role || 'hider',
+                isCaught: cp.isCaught ?? false,
+                isFrozen: cp.isFrozen ?? false,
+                frozenAt: cp.frozenAt ?? null,
+                rescuesCount: cp.rescuesCount ?? 0,
+                revealedLat: cp.revealedLat ?? null,
+                revealedLng: cp.revealedLng ?? null,
+                revealedAt: cp.revealedAt ?? null,
+                joinedAt: cp.joinedAt ? new Date(cp.joinedAt) : new Date()
+              });
+            }
+          });
+        }
+
+        // Rehydrate collectibles if provided
+        if (Array.isArray(clientMatchSync.collectibles)) {
+          clientMatchSync.collectibles.forEach((cc: any) => {
+            if (!mockCollectibles.some(c => c.id === cc.id && c.matchId === matchId)) {
+              mockCollectibles.push({ ...cc, matchId });
+            }
           });
         }
       }
@@ -1149,6 +1840,10 @@ app.get('/api/matches/:id', async (req: any, res) => {
         ...p,
         name: u?.name || p.userId,
         avatar: u?.avatar || '',
+        isCaught: p.isCaught ?? false,
+        isFrozen: p.isFrozen ?? false,
+        frozenAt: p.frozenAt ?? null,
+        rescuesCount: p.rescuesCount ?? 0,
         lat: prof?.lat || 0,
         lng: prof?.lng || 0
       };
@@ -1163,6 +1858,8 @@ app.get('/api/matches/:id', async (req: any, res) => {
       return { ...b, hidden };
     });
 
+    const matchCollectibles = mockCollectibles.filter(c => c.matchId === matchId);
+
     // Compute current shrinking zone radius
     const hidingEndsTime = matchRow.hidingEndsAt ? new Date(matchRow.hidingEndsAt).getTime() : null;
     let currentZoneRadius = matchRow.boundaryRadius ?? 500;
@@ -1172,7 +1869,11 @@ app.get('/api/matches/:id', async (req: any, res) => {
       currentZoneRadius = Math.max(50, currentZoneRadius - intervals * (matchRow.zoneShrinkAmount ?? 100));
     }
 
-    res.json({ match: { ...matchRow, currentZoneRadius }, participants: participantsList, bombs: activeBombs });
+    const activePowerUps = (mockPowerUps.get(matchId) || []).filter(
+      p => p.isActive && new Date(p.expiresAt).getTime() > Date.now()
+    );
+
+    res.json({ match: { ...matchRow, currentZoneRadius }, participants: participantsList, bombs: activeBombs, collectibles: matchCollectibles, powerUps: activePowerUps });
   }
 });
 
@@ -1238,7 +1939,12 @@ app.post('/api/matches/:id/join', async (req: any, res) => {
 app.post('/api/matches/:id/settings', async (req: any, res) => {
   if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
   const matchId = req.params.id.toUpperCase();
-  const settingsObj = req.body; // durations, center, radius, etc.
+  const settingsObj = { ...req.body }; // durations, center, radius, gameMode, rescueRadius, etc.
+
+  // Validate gameMode if supplied
+  if (settingsObj.gameMode && !['classic', 'freeze_tag', 'infection', 'treasure_hunt'].includes(settingsObj.gameMode)) {
+    return res.status(400).json({ error: `Invalid gameMode: ${settingsObj.gameMode}` });
+  }
 
   if (isDbConnected) {
     const matchRow = await db.query.matches.findFirst({ where: eq(matches.id, matchId) });
@@ -1278,6 +1984,17 @@ app.post('/api/matches/:id/start', async (req: any, res) => {
       huntingEndsAt
     }).where(eq(matches.id, matchId));
 
+    // Spawn collectibles for the match
+    const spawnedCollectibles = generateMatchCollectibles(
+      matchId,
+      matchRow.boundaryCenterLat || 59.9139,
+      matchRow.boundaryCenterLng || 10.7522,
+      matchRow.boundaryRadius || 500
+    );
+
+    await db.delete(collectibles).where(eq(collectibles.matchId, matchId));
+    await db.insert(collectibles).values(spawnedCollectibles);
+
     res.json({ success: true });
   } else {
     const matchRow = mockMatches.get(matchId);
@@ -1293,6 +2010,17 @@ app.post('/api/matches/:id/start', async (req: any, res) => {
     matchRow.hidingEndsAt = hidingEndsAt;
     matchRow.huntingEndsAt = huntingEndsAt;
 
+    // Spawn collectibles for mock match
+    const spawnedCollectibles = generateMatchCollectibles(
+      matchId,
+      matchRow.boundaryCenterLat || 59.9139,
+      matchRow.boundaryCenterLng || 10.7522,
+      matchRow.boundaryRadius || 500
+    );
+
+    mockCollectibles = mockCollectibles.filter(c => c.matchId !== matchId);
+    mockCollectibles.push(...spawnedCollectibles);
+
     res.json({ success: true });
   }
 });
@@ -1302,6 +2030,8 @@ app.post('/api/matches/:id/catch', async (req: any, res) => {
   if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
   const matchId = req.params.id.toUpperCase();
   const { targetId } = req.body;
+
+  await evaluateMatchTick(matchId, new Date());
 
   if (isDbConnected) {
     const matchRow = await db.query.matches.findFirst({ where: eq(matches.id, matchId) });
@@ -1317,11 +2047,47 @@ app.post('/api/matches/:id/catch', async (req: any, res) => {
     // Use live hider profile position, not the revealed snapshot
     const targetProfile = await db.query.profiles.findFirst({ where: eq(profiles.id, targetId) });
 
+    // Check if seeker is snared by Freeze Trap
+    const seekerSnaredUntil = playerSnaredMap.get(`${matchId}_${req.user.id}`) || 0;
+    if (seekerSnaredUntil > Date.now()) {
+      const remSec = Math.ceil((seekerSnaredUntil - Date.now()) / 1000);
+      return res.status(400).json({ error: `You are snared by a Freeze Trap (${remSec}s remaining)` });
+    }
+
     if (!myProfile || !targetPart || targetPart.role !== 'hider' || targetPart.isCaught) {
       return res.status(400).json({ error: 'Invalid catch target' });
     }
+    if (matchRow.gameMode === 'freeze_tag' && targetPart.isFrozen) {
+      return res.status(400).json({ error: 'Player is already frozen' });
+    }
     if (!targetProfile || targetProfile.lat == null) {
       return res.status(400).json({ error: 'Hider position not available' });
+    }
+
+    // Freeze Tag immunity check
+    if (matchRow.gameMode === 'freeze_tag') {
+      const immunityUntil = frozenImmunityMap.get(`${matchId}_${targetId}`);
+      if (immunityUntil && Date.now() < immunityUntil) {
+        return res.status(400).json({ error: 'Target has post-rescue immunity' });
+      }
+    }
+
+    // Shield Bubble absorption check
+    const targetShieldUntil = targetPart.activeShieldUntil
+      ? new Date(targetPart.activeShieldUntil).getTime()
+      : (playerShieldMap.get(`${matchId}_${targetId}`) || 0);
+
+    if (targetShieldUntil > Date.now()) {
+      targetPart.activeShieldUntil = null;
+      playerShieldMap.delete(`${matchId}_${targetId}`);
+      const matchPowerUps = mockPowerUps.get(matchId) || [];
+      const activeShield = matchPowerUps.find(p => p.type === 'shield' && p.userId === targetId && p.isActive);
+      if (activeShield) activeShield.isActive = false;
+
+      await db.update(profiles).set({ score: sql`${profiles.score} + ${POWERUP_CONFIG.shield.dodgeXp}` }).where(eq(profiles.id, targetId));
+      frozenImmunityMap.set(`${matchId}_${targetId}`, Date.now() + POWERUP_CONFIG.shield.graceImmunityMs);
+
+      return res.status(400).json({ error: 'Target protected by Shield Bubble' });
     }
 
     const dist = getDistance(myProfile.lat || 0, myProfile.lng || 0, targetProfile.lat, targetProfile.lng);
@@ -1329,12 +2095,20 @@ app.post('/api/matches/:id/catch', async (req: any, res) => {
       return res.status(400).json({ error: `Hider is too far (Distance: ${Math.round(dist)}m, Limit: ${captureRadius}m)` });
     }
 
-    // Capture
-    await db.update(matchParticipants).set({ isCaught: true }).where(eq(matchParticipants.id, targetPart.id));
-    await db.insert(catches).values({ hunterId: req.user.id, targetId, matchId, timestamp: new Date() });
-
-    // Reward points
-    await db.update(profiles).set({ score: sql`${profiles.score} + 100` }).where(eq(profiles.id, req.user.id));
+    const now = new Date();
+    if (matchRow.gameMode === 'freeze_tag') {
+      await db.update(matchParticipants).set({ isFrozen: true, frozenAt: now }).where(eq(matchParticipants.id, targetPart.id));
+      await db.insert(catches).values({ hunterId: req.user.id, targetId, matchId, timestamp: now });
+      await db.update(profiles).set({ score: sql`${profiles.score} + 100` }).where(eq(profiles.id, req.user.id));
+    } else if (matchRow.gameMode === 'infection') {
+      await db.update(matchParticipants).set({ role: 'seeker', isCaught: false }).where(eq(matchParticipants.id, targetPart.id));
+      await db.insert(catches).values({ hunterId: req.user.id, targetId, matchId, timestamp: now });
+      await db.update(profiles).set({ score: sql`${profiles.score} + 100` }).where(eq(profiles.id, req.user.id));
+    } else {
+      await db.update(matchParticipants).set({ isCaught: true }).where(eq(matchParticipants.id, targetPart.id));
+      await db.insert(catches).values({ hunterId: req.user.id, targetId, matchId, timestamp: now });
+      await db.update(profiles).set({ score: sql`${profiles.score} + 100` }).where(eq(profiles.id, req.user.id));
+    }
 
     res.json({ success: true });
   } else {
@@ -1344,6 +2118,13 @@ app.post('/api/matches/:id/catch', async (req: any, res) => {
     }
     const captureRadius = matchRow.captureRadius ?? matchRow.catchRadius ?? 30;
 
+    // Check if seeker is snared by Freeze Trap
+    const seekerSnaredUntil = playerSnaredMap.get(`${matchId}_${req.user.id}`) || 0;
+    if (seekerSnaredUntil > Date.now()) {
+      const remSec = Math.ceil((seekerSnaredUntil - Date.now()) / 1000);
+      return res.status(400).json({ error: `You are snared by a Freeze Trap (${remSec}s remaining)` });
+    }
+
     const myProfile = mockProfiles.get(req.user.id);
     const targetPart = mockParticipants.find(p => p.matchId === matchId && p.userId === targetId);
     const targetProfile = mockProfiles.get(targetId);
@@ -1351,8 +2132,37 @@ app.post('/api/matches/:id/catch', async (req: any, res) => {
     if (!myProfile || !targetPart || targetPart.role !== 'hider' || targetPart.isCaught) {
       return res.status(400).json({ error: 'Invalid catch target' });
     }
+    if (matchRow.gameMode === 'freeze_tag' && targetPart.isFrozen) {
+      return res.status(400).json({ error: 'Player is already frozen' });
+    }
     if (!targetProfile || targetProfile.lat == null) {
       return res.status(400).json({ error: 'Hider position not available' });
+    }
+
+    // Freeze Tag immunity check
+    if (matchRow.gameMode === 'freeze_tag') {
+      const immunityUntil = frozenImmunityMap.get(`${matchId}_${targetId}`) || targetPart.frozenImmunityUntil;
+      if (immunityUntil && Date.now() < immunityUntil) {
+        return res.status(400).json({ error: 'Target has post-rescue immunity' });
+      }
+    }
+
+    // Shield Bubble absorption check
+    const targetShieldUntil = targetPart.activeShieldUntil
+      ? new Date(targetPart.activeShieldUntil).getTime()
+      : (playerShieldMap.get(`${matchId}_${targetId}`) || 0);
+
+    if (targetShieldUntil > Date.now()) {
+      targetPart.activeShieldUntil = null;
+      playerShieldMap.delete(`${matchId}_${targetId}`);
+      const matchPowerUps = mockPowerUps.get(matchId) || [];
+      const activeShield = matchPowerUps.find(p => p.type === 'shield' && p.userId === targetId && p.isActive);
+      if (activeShield) activeShield.isActive = false;
+
+      targetProfile.score = (targetProfile.score || 0) + POWERUP_CONFIG.shield.dodgeXp;
+      frozenImmunityMap.set(`${matchId}_${targetId}`, Date.now() + POWERUP_CONFIG.shield.graceImmunityMs);
+
+      return res.status(400).json({ error: 'Target protected by Shield Bubble' });
     }
 
     const dist = getDistance(myProfile.lat, myProfile.lng, targetProfile.lat, targetProfile.lng);
@@ -1360,18 +2170,342 @@ app.post('/api/matches/:id/catch', async (req: any, res) => {
       return res.status(400).json({ error: `Hider is too far (${Math.round(dist)}m)` });
     }
 
-    targetPart.isCaught = true;
-    myProfile.score += 100;
-
-    mockCatches.push({
-      id: mockCatches.length + 1,
-      matchId,
-      hunterId: req.user.id,
-      targetId,
-      timestamp: new Date()
-    });
+    const now = new Date();
+    if (matchRow.gameMode === 'freeze_tag') {
+      targetPart.isFrozen = true;
+      targetPart.frozenAt = now;
+      myProfile.score = (myProfile.score || 0) + 100;
+      mockCatches.push({ id: mockCatches.length + 1, matchId, hunterId: req.user.id, targetId, timestamp: now });
+    } else if (matchRow.gameMode === 'infection') {
+      targetPart.role = 'seeker';
+      targetPart.isCaught = false;
+      myProfile.score = (myProfile.score || 0) + 100;
+      mockCatches.push({ id: mockCatches.length + 1, matchId, hunterId: req.user.id, targetId, timestamp: now });
+    } else {
+      targetPart.isCaught = true;
+      myProfile.score = (myProfile.score || 0) + 100;
+      mockCatches.push({ id: mockCatches.length + 1, matchId, hunterId: req.user.id, targetId, timestamp: now });
+    }
 
     res.json({ success: true });
+  }
+});
+
+// POST: Deploy tactical power-up (sprint, decoy, shield, freeze_trap)
+app.post('/api/matches/:id/powerup', async (req: any, res) => {
+  if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+  const matchId = req.params.id.toUpperCase();
+  const { type, lat, lng } = req.body;
+
+  // 1. Validate payload parameters
+  const VALID_TYPES = ['sprint', 'decoy', 'shield', 'freeze_trap'];
+  if (!type || !VALID_TYPES.includes(type)) {
+    return res.status(400).json({ error: 'Invalid power-up type' });
+  }
+  let pLat = typeof lat === 'number' && !isNaN(lat) ? lat : null;
+  let pLng = typeof lng === 'number' && !isNaN(lng) ? lng : null;
+
+  if (pLat == null || pLng == null) {
+    if (isDbConnected) {
+      const prof = await db.query.profiles.findFirst({ where: eq(profiles.id, req.user.id) });
+      if (prof?.lat != null && prof?.lng != null) {
+        pLat = prof.lat;
+        pLng = prof.lng;
+      }
+    } else {
+      const prof = mockProfiles.get(req.user.id);
+      if (prof?.lat != null && prof?.lng != null) {
+        pLat = prof.lat;
+        pLng = prof.lng;
+      }
+    }
+  }
+
+  if (pLat == null || pLng == null) {
+    return res.status(400).json({ error: 'Valid lat and lng coordinates are required' });
+  }
+
+  // 2. Evaluate tick and verify match status
+  await evaluateMatchTick(matchId, new Date());
+
+  const matchRow = isDbConnected
+    ? await db.query.matches.findFirst({ where: eq(matches.id, matchId) })
+    : mockMatches.get(matchId);
+
+  if (!matchRow) return res.status(404).json({ error: 'Match not found' });
+  if (matchRow.status !== 'hunting') {
+    return res.status(400).json({ error: 'Power-ups can only be deployed during hunting phase' });
+  }
+
+  // 3. Verify player participation and active status
+  const participant = isDbConnected
+    ? await db.query.matchParticipants.findFirst({
+        where: and(eq(matchParticipants.matchId, matchId), eq(matchParticipants.userId, req.user.id))
+      })
+    : mockParticipants.find(p => p.matchId === matchId && p.userId === req.user.id);
+
+  if (!participant) {
+    return res.status(403).json({ error: 'You are not a participant in this match' });
+  }
+  if (participant.isCaught) {
+    return res.status(400).json({ error: 'Captured players cannot deploy power-ups' });
+  }
+  if (matchRow.gameMode === 'freeze_tag' && participant.isFrozen) {
+    return res.status(400).json({ error: 'Frozen players cannot deploy power-ups' });
+  }
+
+  // 4. Verify cooldown
+  const nowMs = Date.now();
+  const userCooldownKey = `${matchId}_${req.user.id}`;
+  const userCooldowns = playerPowerUpCooldowns.get(userCooldownKey) || {};
+
+  if (userCooldowns[type] && userCooldowns[type] > nowMs) {
+    const remainingSec = Math.ceil((userCooldowns[type] - nowMs) / 1000);
+    return res.status(400).json({
+      error: `Power-up on cooldown (${remainingSec}s remaining)`,
+      cooldownUntil: userCooldowns[type]
+    });
+  }
+
+  // 5. Update cooldown timestamp
+  const config = POWERUP_CONFIG[type as keyof typeof POWERUP_CONFIG];
+  userCooldowns[type] = nowMs + config.cooldownMs;
+  playerPowerUpCooldowns.set(userCooldownKey, userCooldowns);
+
+  // 6. Create ActivePowerUp entity
+  const activeDuration = config.durationMs;
+  const powerUpId = `${matchId}_${type}_${nowMs}_${Math.random().toString(36).substring(2, 6)}`;
+  const newPowerUp: ActivePowerUp = {
+    id: powerUpId,
+    matchId,
+    userId: req.user.id,
+    userName: req.user.name || 'Operative',
+    userRole: participant.role,
+    type: type as 'sprint' | 'decoy' | 'shield' | 'freeze_trap',
+    lat: pLat,
+    lng: pLng,
+    radius: type === 'freeze_trap' ? POWERUP_CONFIG.freeze_trap.trapRadius : undefined,
+    activatedAt: new Date(nowMs),
+    expiresAt: new Date(nowMs + activeDuration),
+    isActive: true,
+    isTriggered: false,
+    triggeredBy: null
+  };
+
+  // 7. Store in active match power-ups
+  const matchPowerUps = mockPowerUps.get(matchId) || [];
+  matchPowerUps.push(newPowerUp);
+  mockPowerUps.set(matchId, matchPowerUps);
+
+  // 8. Register type-specific active buffs in ephemeral maps
+  if (type === 'shield') {
+    playerShieldMap.set(userCooldownKey, nowMs + activeDuration);
+    participant.activeShieldUntil = new Date(nowMs + activeDuration);
+  } else if (type === 'sprint') {
+    playerSprintMap.set(userCooldownKey, nowMs + activeDuration);
+    participant.activeSprintUntil = new Date(nowMs + activeDuration);
+  }
+
+  res.json({
+    success: true,
+    powerUp: newPowerUp,
+    cooldownUntil: userCooldowns[type],
+    activeUntil: nowMs + activeDuration
+  });
+});
+
+// POST: Rescue a frozen teammate in Freeze Tag mode
+app.post('/api/matches/:id/rescue', async (req: any, res) => {
+  if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+  const matchId = req.params.id.toUpperCase();
+  const { targetId } = req.body;
+
+  if (!targetId) return res.status(400).json({ error: 'Missing targetId' });
+  if (targetId === req.user.id) return res.status(400).json({ error: 'Cannot rescue yourself' });
+
+  if (isDbConnected) {
+    const matchRow = await db.query.matches.findFirst({ where: eq(matches.id, matchId) });
+    if (!matchRow || matchRow.status !== 'hunting') {
+      return res.status(400).json({ error: 'Match is not in hunting phase' });
+    }
+    if (matchRow.gameMode !== 'freeze_tag') {
+      return res.status(400).json({ error: 'Rescue is only available in Freeze Tag mode' });
+    }
+
+    const rescueRadius = matchRow.rescueRadius ?? 10;
+
+    const rescuerPart = await db.query.matchParticipants.findFirst({
+      where: and(eq(matchParticipants.matchId, matchId), eq(matchParticipants.userId, req.user.id))
+    });
+    const targetPart = await db.query.matchParticipants.findFirst({
+      where: and(eq(matchParticipants.matchId, matchId), eq(matchParticipants.userId, targetId))
+    });
+
+    if (!rescuerPart || rescuerPart.role !== 'hider' || rescuerPart.isCaught || rescuerPart.isFrozen) {
+      return res.status(400).json({ error: 'Rescuer must be an active, unfrozen runner' });
+    }
+    if (!targetPart || targetPart.role !== 'hider' || !targetPart.isFrozen || targetPart.isCaught) {
+      return res.status(400).json({ error: 'Target is not a frozen teammate' });
+    }
+
+    const rescuerProf = await db.query.profiles.findFirst({ where: eq(profiles.id, req.user.id) });
+    const targetProf = await db.query.profiles.findFirst({ where: eq(profiles.id, targetId) });
+
+    if (!rescuerProf?.lat || !targetProf?.lat) {
+      return res.status(400).json({ error: 'GPS positions unavailable' });
+    }
+
+    const dist = getDistance(rescuerProf.lat, rescuerProf.lng, targetProf.lat, targetProf.lng);
+    if (dist > rescueRadius) {
+      return res.status(400).json({ error: `Teammate is too far to rescue (${Math.round(dist)}m > ${rescueRadius}m)` });
+    }
+
+    await db.update(matchParticipants).set({ isFrozen: false, frozenAt: null }).where(eq(matchParticipants.id, targetPart.id));
+    await db.update(matchParticipants).set({ rescuesCount: sql`${matchParticipants.rescuesCount} + 1` }).where(eq(matchParticipants.id, rescuerPart.id));
+    await db.update(profiles).set({ score: sql`${profiles.score} + 50` }).where(eq(profiles.id, req.user.id));
+
+    frozenImmunityMap.set(`${matchId}_${targetId}`, Date.now() + 3000);
+
+    return res.json({ success: true, message: 'Teammate rescued!', rescuesCount: (rescuerPart.rescuesCount || 0) + 1, immunityMs: 3000 });
+  } else {
+    const matchRow = mockMatches.get(matchId);
+    if (!matchRow || matchRow.status !== 'hunting') {
+      return res.status(400).json({ error: 'Match is not in hunting phase' });
+    }
+    if (matchRow.gameMode !== 'freeze_tag') {
+      return res.status(400).json({ error: 'Rescue is only available in Freeze Tag mode' });
+    }
+
+    const rescueRadius = matchRow.rescueRadius ?? 10;
+    const rescuerPart = mockParticipants.find(p => p.matchId === matchId && p.userId === req.user.id);
+    const targetPart = mockParticipants.find(p => p.matchId === matchId && p.userId === targetId);
+
+    if (!rescuerPart || rescuerPart.role !== 'hider' || rescuerPart.isCaught || rescuerPart.isFrozen) {
+      return res.status(400).json({ error: 'Rescuer must be an active, unfrozen runner' });
+    }
+    if (!targetPart || targetPart.role !== 'hider' || !targetPart.isFrozen || targetPart.isCaught) {
+      return res.status(400).json({ error: 'Target is not a frozen teammate' });
+    }
+
+    const rescuerProf = mockProfiles.get(req.user.id);
+    const targetProf = mockProfiles.get(targetId);
+
+    if (!rescuerProf?.lat || !targetProf?.lat) {
+      return res.status(400).json({ error: 'GPS positions unavailable' });
+    }
+
+    const dist = getDistance(rescuerProf.lat, rescuerProf.lng, targetProf.lat, targetProf.lng);
+    if (dist > rescueRadius) {
+      return res.status(400).json({ error: `Teammate is too far to rescue (${Math.round(dist)}m > ${rescueRadius}m)` });
+    }
+
+    targetPart.isFrozen = false;
+    targetPart.frozenAt = null;
+    targetPart.frozenImmunityUntil = Date.now() + 3000;
+    frozenImmunityMap.set(`${matchId}_${targetId}`, Date.now() + 3000);
+    rescuerPart.rescuesCount = (rescuerPart.rescuesCount || 0) + 1;
+    if (rescuerProf) rescuerProf.score = (rescuerProf.score || 0) + 50;
+
+    return res.json({ success: true, message: 'Teammate rescued!', rescuesCount: rescuerPart.rescuesCount, immunityMs: 3000 });
+  }
+});
+
+// POST: Collect an item in Geo-Bounty Skattejakt / Treasure Hunt mode
+app.post('/api/matches/:id/collect', async (req: any, res) => {
+  if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+  const matchId = req.params.id.toUpperCase();
+  const { itemId } = req.body;
+
+  if (!itemId) return res.status(400).json({ error: 'itemId is required' });
+
+  const collectRadius = 10; // 10 meters pickup radius
+
+  if (isDbConnected) {
+    const item = await db.query.collectibles.findFirst({
+      where: and(eq(collectibles.id, itemId), eq(collectibles.matchId, matchId))
+    });
+    if (!item) return res.status(404).json({ error: 'Item not found' });
+    if (item.isCollected) return res.status(400).json({ error: 'Item already collected' });
+
+    const matchRow = await db.query.matches.findFirst({ where: eq(matches.id, matchId) });
+    if (!matchRow || (matchRow.status !== 'hiding' && matchRow.status !== 'hunting')) {
+      return res.status(400).json({ error: 'Match is not active' });
+    }
+
+    const myProfile = await db.query.profiles.findFirst({ where: eq(profiles.id, req.user.id) });
+    if (!myProfile || myProfile.lat == null || myProfile.lng == null) {
+      return res.status(400).json({ error: 'Player GPS coordinates unavailable' });
+    }
+
+    const dist = getDistance(myProfile.lat, myProfile.lng, item.lat, item.lng);
+    if (dist > collectRadius) {
+      return res.status(400).json({ error: `Too far (${Math.round(dist)}m > ${collectRadius}m)` });
+    }
+
+    const now = new Date();
+    const updated = await db.update(collectibles)
+      .set({ isCollected: true, collectedById: req.user.id, collectedAt: now })
+      .where(and(eq(collectibles.id, itemId), eq(collectibles.matchId, matchId), eq(collectibles.isCollected, false)))
+      .returning();
+
+    if (updated.length === 0) {
+      return res.status(400).json({ error: 'Item already collected by another player' });
+    }
+
+    await db.update(profiles).set({ score: sql`${profiles.score} + ${item.points}` }).where(eq(profiles.id, req.user.id));
+
+    // Win check: Did player take the last Bounty Crystal?
+    const uncollectedCrystals = await db.select({ count: sql`count(*)` })
+      .from(collectibles)
+      .where(and(
+        eq(collectibles.matchId, matchId),
+        eq(collectibles.type, 'bounty_crystal'),
+        eq(collectibles.isCollected, false)
+      ));
+
+    let matchFinished = false;
+    if (Number(uncollectedCrystals[0]?.count ?? 1) === 0) {
+      await db.update(matches).set({ status: 'finished' }).where(eq(matches.id, matchId));
+      matchFinished = true;
+    }
+
+    res.json({ success: true, item: updated[0], points: item.points, pointsAwarded: item.points, matchFinished });
+  } else {
+    const item = mockCollectibles.find(c => c.id === itemId && c.matchId === matchId);
+    if (!item) return res.status(404).json({ error: 'Item not found' });
+    if (item.isCollected) return res.status(400).json({ error: 'Item already collected' });
+
+    const matchRow = mockMatches.get(matchId);
+    if (!matchRow || (matchRow.status !== 'hiding' && matchRow.status !== 'hunting')) {
+      return res.status(400).json({ error: 'Match is not active' });
+    }
+
+    const myProfile = mockProfiles.get(req.user.id);
+    if (!myProfile || myProfile.lat == null || myProfile.lng == null) {
+      return res.status(400).json({ error: 'Player GPS coordinates unavailable' });
+    }
+
+    const dist = getDistance(myProfile.lat, myProfile.lng, item.lat, item.lng);
+    if (dist > collectRadius) {
+      return res.status(400).json({ error: `Too far (${Math.round(dist)}m > ${collectRadius}m)` });
+    }
+
+    item.isCollected = true;
+    item.collectedById = req.user.id;
+    item.collectedAt = new Date();
+    myProfile.score = (myProfile.score || 0) + item.points;
+
+    const remainingCrystals = mockCollectibles.filter(
+      c => c.matchId === matchId && c.type === 'bounty_crystal' && !c.isCollected
+    );
+
+    let matchFinished = false;
+    if (remainingCrystals.length === 0) {
+      matchRow.status = 'finished';
+      matchFinished = true;
+    }
+
+    res.json({ success: true, item, points: item.points, pointsAwarded: item.points, matchFinished });
   }
 });
 
@@ -1687,7 +2821,7 @@ app.post('/api/social/messages', async (req: any, res) => {
 });
 
 // --- SERVER BACKGROUND LOOPS & LOCAL LISTENER ---
-if (!process.env.VERCEL) {
+if (!process.env.VERCEL && process.env.NODE_ENV !== 'test') {
   // Core game tick loop (runs every 1 second)
   setInterval(async () => {
     const now = new Date();
@@ -1700,24 +2834,8 @@ if (!process.env.VERCEL) {
         );
 
         for (const matchRow of activeMatches) {
-          let currentStatus = matchRow.status;
-
-          // Transition: Hiding -> Hunting
-          if (currentStatus === 'hiding' && matchRow.hidingEndsAt && now >= matchRow.hidingEndsAt) {
-            await db.update(matches).set({ status: 'hunting' }).where(eq(matches.id, matchRow.id));
-            currentStatus = 'hunting';
-          }
-
-          // Transition: Hunting -> Finished (Timeout)
-          if (currentStatus === 'hunting' && matchRow.huntingEndsAt && now >= matchRow.huntingEndsAt) {
-            await db.update(matches).set({ status: 'finished' }).where(eq(matches.id, matchRow.id));
-            continue;
-          }
-
-          // Get participants of this match
-          const parts = await db.select().from(matchParticipants).where(eq(matchParticipants.matchId, matchRow.id));
-
           // --- MOCK WALK SIMULATION ---
+          const parts = await db.select().from(matchParticipants).where(eq(matchParticipants.matchId, matchRow.id));
           const mockIds = ['host', 'hider1', 'hider2', 'seeker1'];
           for (const p of parts) {
             const isMock = mockIds.includes(p.userId);
@@ -1741,110 +2859,15 @@ if (!process.env.VERCEL) {
             }
           }
 
-          if (currentStatus === 'hunting') {
-            const hidingEndsTime = matchRow.hidingEndsAt ? new Date(matchRow.hidingEndsAt).getTime() : 0;
-            const elapsed = now.getTime() - hidingEndsTime;
-            const revealIntervalMs = matchRow.revealInterval * 1000;
-            const currentCycle = Math.floor(elapsed / revealIntervalMs);
-            const hiders = parts.filter(p => p.role === 'hider');
-            const seekers = parts.filter(p => p.role === 'seeker');
-
-            // Check if hider positions should snapshot reveal
-            for (const hider of hiders) {
-              const lastRevealed = hider.revealedAt ? new Date(hider.revealedAt).getTime() : 0;
-              const cycleOfLastReveal = Math.floor((lastRevealed - hidingEndsTime) / revealIntervalMs);
-
-              // Snapshot position if this cycle is unrevealed, or if it is the first reveal of hunting phase
-              if (hider.revealedLat == null || currentCycle > cycleOfLastReveal) {
-                const hiderProfile = await db.query.profiles.findFirst({ where: eq(profiles.id, hider.userId) });
-                if (hiderProfile) {
-                  await db.update(matchParticipants).set({
-                    revealedLat: hiderProfile.lat,
-                    revealedLng: hiderProfile.lng,
-                    revealedAt: now
-                  }).where(eq(matchParticipants.id, hider.id));
-                }
-              }
-            }
-
-            // --- AUTO-CAPTURE: Check every seeker vs every uncaught hider (live positions) ---
-            const captureRadius = matchRow.captureRadius ?? matchRow.catchRadius ?? 4;
-            for (const seeker of seekers) {
-              const seekerProfile = await db.query.profiles.findFirst({ where: eq(profiles.id, seeker.userId) });
-              if (!seekerProfile || !seekerProfile.lat || !seekerProfile.lng) continue;
-              for (const hider of hiders) {
-                if (hider.isCaught) continue;
-                const hiderProfile = await db.query.profiles.findFirst({ where: eq(profiles.id, hider.userId) });
-                if (!hiderProfile || !hiderProfile.lat || !hiderProfile.lng) continue;
-                const dist = getDistance(seekerProfile.lat, seekerProfile.lng, hiderProfile.lat, hiderProfile.lng);
-                if (dist <= captureRadius) {
-                  await db.update(matchParticipants).set({ isCaught: true }).where(eq(matchParticipants.id, hider.id));
-                  await db.insert(catches).values({ matchId: matchRow.id, hunterId: seeker.userId, targetId: hider.userId, timestamp: now });
-                  await db.update(profiles).set({ score: sql`${profiles.score} + 100` }).where(eq(profiles.id, seeker.userId));
-                  hider.isCaught = true; // Prevent double-processing in same tick
-                }
-              }
-            }
-
-            // 2. Process bombs in this match
-            const matchBombs = await db.select().from(bombs).where(eq(bombs.matchId, matchRow.id));
-            for (const bombRow of matchBombs) {
-              let bombIsActive = bombRow.isActive;
-              // Activate bomb if arming delay finished
-              if (!bombIsActive && now >= bombRow.activatesAt) {
-                await db.update(bombs).set({ isActive: true }).where(eq(bombs.id, bombRow.id));
-                bombIsActive = true;
-              }
-
-              if (bombIsActive) {
-                // Check if any uncaught hiders are inside bomb blast radius
-                for (const hider of hiders) {
-                  if (hider.isCaught) continue;
-                  const hiderProfile = await db.query.profiles.findFirst({ where: eq(profiles.id, hider.userId) });
-                  if (hiderProfile && hiderProfile.lat && hiderProfile.lng) {
-                    const dist = getDistance(bombRow.lat, bombRow.lng, hiderProfile.lat, hiderProfile.lng);
-                    if (dist <= bombRow.radius) {
-                      // Explode Catch!
-                      await db.update(matchParticipants).set({ isCaught: true }).where(eq(matchParticipants.id, hider.id));
-                      await db.insert(catches).values({
-                        matchId: matchRow.id,
-                        hunterId: bombRow.placedById,
-                        targetId: hider.userId,
-                        timestamp: now
-                      });
-                      // Reward score
-                      await db.update(profiles).set({ score: sql`${profiles.score} + 100` }).where(eq(profiles.id, bombRow.placedById));
-                    }
-                  }
-                }
-              }
-            }
-
-            // Check Win Condition: Are all hiders caught?
-            const updatedParts = await db.select().from(matchParticipants).where(eq(matchParticipants.matchId, matchRow.id));
-            const updatedHiders = updatedParts.filter(p => p.role === 'hider');
-            if (updatedHiders.length > 0 && updatedHiders.every(h => h.isCaught)) {
-              await db.update(matches).set({ status: 'finished' }).where(eq(matches.id, matchRow.id));
-            }
-          }
+          await evaluateMatchTick(matchRow.id, now);
         }
       } catch (err) {
         console.error('Server loop DB error:', err);
       }
     } else {
       // --- Mock Loop Operations ---
-      mockMatches.forEach(matchRow => {
-        let currentStatus = matchRow.status;
-
-        if (currentStatus === 'hiding' && matchRow.hidingEndsAt && now >= matchRow.hidingEndsAt) {
-          matchRow.status = 'hunting';
-          currentStatus = 'hunting';
-        }
-
-        if (currentStatus === 'hunting' && matchRow.huntingEndsAt && now >= matchRow.huntingEndsAt) {
-          matchRow.status = 'finished';
-          return;
-        }
+      for (const matchRow of Array.from(mockMatches.values())) {
+        if (matchRow.status !== 'hiding' && matchRow.status !== 'hunting') continue;
 
         // --- MOCK WALK SIMULATION (Mock Database) ---
         const parts = mockParticipants.filter(p => p.matchId === matchRow.id);
@@ -1869,84 +2892,8 @@ if (!process.env.VERCEL) {
           }
         });
 
-        if (currentStatus === 'hunting') {
-          const hidingEndsTime = matchRow.hidingEndsAt ? new Date(matchRow.hidingEndsAt).getTime() : 0;
-          const elapsed = now.getTime() - hidingEndsTime;
-          const revealIntervalMs = matchRow.revealInterval * 1000;
-          const currentCycle = Math.floor(elapsed / revealIntervalMs);
-
-          const hiders = mockParticipants.filter(p => p.matchId === matchRow.id && p.role === 'hider');
-
-          hiders.forEach(hider => {
-            const lastRevealed = hider.revealedAt ? new Date(hider.revealedAt).getTime() : 0;
-            const cycleOfLastReveal = Math.floor((lastRevealed - hidingEndsTime) / revealIntervalMs);
-
-            if (hider.revealedLat == null || currentCycle > cycleOfLastReveal) {
-              const hiderProfile = mockProfiles.get(hider.userId);
-              if (hiderProfile) {
-                hider.revealedLat = hiderProfile.lat;
-                hider.revealedLng = hiderProfile.lng;
-                hider.revealedAt = now;
-              }
-            }
-          });
-
-          // --- AUTO-CAPTURE: Check every seeker vs every uncaught hider (live positions) ---
-          const captureRadius = matchRow.captureRadius ?? matchRow.catchRadius ?? 4;
-          const seekers = mockParticipants.filter(p => p.matchId === matchRow.id && p.role === 'seeker');
-          seekers.forEach(seeker => {
-            const seekerProfile = mockProfiles.get(seeker.userId);
-            if (!seekerProfile) return;
-            hiders.forEach(hider => {
-              if (hider.isCaught) return;
-              const hiderProfile = mockProfiles.get(hider.userId);
-              if (!hiderProfile) return;
-              const dist = getDistance(seekerProfile.lat, seekerProfile.lng, hiderProfile.lat, hiderProfile.lng);
-              if (dist <= captureRadius) {
-                hider.isCaught = true;
-                const sp = mockProfiles.get(seeker.userId);
-                if (sp) sp.score += 100;
-                mockCatches.push({ id: mockCatches.length + 1, matchId: matchRow.id, hunterId: seeker.userId, targetId: hider.userId, timestamp: now });
-              }
-            });
-          });
-
-          // Bombs in mock
-          mockBombs.filter(b => b.matchId === matchRow.id).forEach(bombRow => {
-            if (!bombRow.isActive && now >= bombRow.activatesAt) {
-              bombRow.isActive = true;
-            }
-
-            if (bombRow.isActive) {
-              hiders.forEach(hider => {
-                if (hider.isCaught) return;
-                const hiderProfile = mockProfiles.get(hider.userId);
-                if (hiderProfile) {
-                  const dist = getDistance(bombRow.lat, bombRow.lng, hiderProfile.lat, hiderProfile.lng);
-                  if (dist <= bombRow.radius) {
-                    hider.isCaught = true;
-                    const seekerProfile = mockProfiles.get(bombRow.placedById);
-                    if (seekerProfile) seekerProfile.score += 100;
-
-                    mockCatches.push({
-                      id: mockCatches.length + 1,
-                      matchId: matchRow.id,
-                      hunterId: bombRow.placedById,
-                      targetId: hider.userId,
-                      timestamp: now
-                    });
-                  }
-                }
-              });
-            }
-          });
-
-          // Win check
-          if (hiders.length > 0 && hiders.every(h => h.isCaught)) {
-            matchRow.status = 'finished';
-          }
-        }
-      });
+        await evaluateMatchTick(matchRow.id, now);
+      }
     }
   }, 1000);
 
@@ -1993,4 +2940,28 @@ if (!process.env.VERCEL) {
 }
 
 export default app;
-export { app, checkDbConnection, seedMockUsers };
+export {
+  app,
+  checkDbConnection,
+  seedMockUsers,
+  evaluateMatchTick,
+  generateMatchCollectibles,
+  getDistance,
+  hashSeed,
+  mulberry32,
+  mockUsers,
+  mockProfiles,
+  mockMatches,
+  mockParticipants,
+  mockCollectibles,
+  mockCatches,
+  mockBombs,
+  mockPowerUps,
+  playerPowerUpCooldowns,
+  playerShieldMap,
+  playerSprintMap,
+  playerSnaredMap,
+  POWERUP_CONFIG,
+  frozenImmunityMap,
+  matchTickDebounce
+};
